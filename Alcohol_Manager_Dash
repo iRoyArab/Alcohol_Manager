@@ -1,0 +1,538 @@
+import dash
+from dash import dcc, html, ctx, no_update
+from dash.dependencies import Input, Output, State, ALL
+import dash_bootstrap_components as dbc
+from google.cloud import bigquery
+from google import genai 
+from datetime import datetime, timedelta
+import os
+import random
+
+# --- Configuration ---
+# ⚠️ REPLACE WITH YOUR ACTUAL PATHS
+SERVICE_ACCOUNT_FILE = r"C:\Users\iroyp\OneDrive\שולחן העבודה\TELEGRAM\Telegram-Autoforwarder-master\hopeful-flash-478009-b7-1acfbd3ccca6.json"
+PROJECT_ID = "hopeful-flash-478009-b7"
+DATASET_ID = "Whisky_Collection"
+TABLE_ID = "my_whisky_collection"
+HISTORY_TABLE_ID = "alcohol_update"
+
+# ⚠️ GEMINI API KEY
+GEMINI_API_KEY = "AIzaSyAPe_6VG52SmLZgXpzh-ZTIilQ4O98fv5E" 
+
+TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
+HISTORY_TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{HISTORY_TABLE_ID}"
+
+# --- Init Services ---
+try:
+    client = bigquery.Client.from_service_account_json(SERVICE_ACCOUNT_FILE, project=PROJECT_ID)
+except Exception as e:
+    print(f"BigQuery Error: {e}")
+    client = None
+
+try:
+    ai_client = genai.Client(api_key=GEMINI_API_KEY)
+except Exception as e:
+    print(f"GenAI Init Error: {e}")
+    ai_client = None
+
+app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], title="Alcohol Manager")
+
+# --- Constants & Fields ---
+DYNAMIC_FIELDS_BASE = [
+    'bottle_name', 'distillery', 'alcohol_type', 'origin_country', 'region', 
+    'casks_aged_in', 'nose', 'palette', 'orignal_volume', 'discount_amount'
+]
+
+BOOLEAN_OPTIONS = [{'label': 'Yes', 'value': True}, {'label': 'No', 'value': False}]
+
+# --- Helper Functions ---
+
+def fetch_all_dropdown_data():
+    if not client: return {}
+    query = f"""
+    SELECT 'bottle_name' as field, bottle_name as val FROM `{TABLE_REF}` WHERE bottle_name IS NOT NULL GROUP BY 1, 2
+    UNION ALL SELECT 'distillery', distillery FROM `{TABLE_REF}` WHERE distillery IS NOT NULL GROUP BY 1, 2
+    UNION ALL SELECT 'alcohol_type', alcohol_type FROM `{TABLE_REF}` WHERE alcohol_type IS NOT NULL GROUP BY 1, 2
+    UNION ALL SELECT 'origin_country', origin_country FROM `{TABLE_REF}` WHERE origin_country IS NOT NULL GROUP BY 1, 2
+    UNION ALL SELECT 'region', region FROM `{TABLE_REF}` WHERE region IS NOT NULL GROUP BY 1, 2
+    UNION ALL SELECT 'casks_aged_in', x FROM `{TABLE_REF}`, UNNEST(casks_aged_in) x GROUP BY 1, 2
+    UNION ALL SELECT 'nose', x FROM `{TABLE_REF}`, UNNEST(nose) x GROUP BY 1, 2
+    UNION ALL SELECT 'palette', x FROM `{TABLE_REF}`, UNNEST(palette) x GROUP BY 1, 2
+    UNION ALL SELECT 'orignal_volume', CAST(orignal_volume AS STRING) FROM `{TABLE_REF}` WHERE orignal_volume IS NOT NULL GROUP BY 1, 2
+    UNION ALL SELECT 'discount_amount', CAST(discount_amount AS STRING) FROM `{TABLE_REF}` WHERE discount_amount IS NOT NULL GROUP BY 1, 2
+    """
+    try:
+        rows = client.query(query).result()
+        data = {k: [] for k in DYNAMIC_FIELDS_BASE}
+        for row in rows:
+            if row.val: data[row.field].append(row.val)
+        
+        options_map = {}
+        for field, values in data.items():
+            try: sorted_vals = sorted(list(set(values)), key=lambda x: float(x))
+            except: sorted_vals = sorted(list(set(values)), key=lambda x: (str(x).lower()))
+            opts = [{'label': str(v), 'value': str(v)} for v in sorted_vals]
+            opts.append({'label': '➕ Add New Value...', 'value': 'ADD_NEW_OPTION'})
+            options_map[field] = opts
+        return options_map
+    except:
+        return {k: [{'label': '➕ Add New...', 'value': 'ADD'}] for k in DYNAMIC_FIELDS_BASE}
+
+def fetch_bottle_list_optimized():
+    if not client: return []
+    query = f"SELECT bottle_id, bottle_name, distillery, stock_status_per FROM `{TABLE_REF}` ORDER BY bottle_id DESC"
+    try:
+        rows = client.query(query).result()
+        return [{'label': f"#{row.bottle_id} - {row.bottle_name} ({row.stock_status_per}%)", 'value': row.bottle_id} for row in rows]
+    except:
+        return []
+
+def get_user_flavor_profile():
+    if not client: return "No data."
+    try:
+        # 1. Regions ordered by count descending (Top 5)
+        q_reg = f"""
+        SELECT region, COUNT(*) as cnt 
+        FROM `{TABLE_REF}` 
+        WHERE region IS NOT NULL 
+        GROUP BY 1 
+        ORDER BY 2 DESC 
+        LIMIT 5
+        """
+        regions = [f"{r.region} ({r.cnt})" for r in client.query(q_reg).result()]
+
+        # 2. Casks ordered by count descending (Top 5)
+        q_cask = f"""
+        SELECT x, COUNT(*) as cnt 
+        FROM `{TABLE_REF}`, UNNEST(casks_aged_in) x 
+        GROUP BY 1 
+        ORDER BY 2 DESC 
+        LIMIT 5
+        """
+        casks = [f"{r.x} ({r.cnt})" for r in client.query(q_cask).result()]
+        
+        # 3. Palette ordered by count descending (Top 5)
+        q_palette = f"""
+        SELECT x, COUNT(*) as cnt 
+        FROM `{TABLE_REF}`, UNNEST(palette) x 
+        GROUP BY 1 
+        ORDER BY 2 DESC 
+        LIMIT 5
+        """
+        palettes = [f"{r.x} ({r.cnt})" for r in client.query(q_palette).result()]
+        
+        # 4. Average Price
+        q_price = f"SELECT AVG(price) as avg_p FROM `{TABLE_REF}` WHERE price > 0"
+        price_res = list(client.query(q_price).result())
+        price = price_res[0].avg_p if price_res and price_res[0].avg_p else 0
+        
+        # Format the profile string for the AI
+        profile_str = (
+            f"Average Spend: ${int(price)}. "
+            f"Top Regions: {', '.join(regions)}. "
+            f"Most Common Casks: {', '.join(casks)}. "
+            f"Most Common Palette Notes: {', '.join(palettes)}."
+        )
+        return profile_str
+        
+    except Exception as e:
+        print(f"Profile Error: {e}")
+        return "New collector."
+
+# --- Pre-Load Data ---
+INITIAL_OPTIONS = fetch_all_dropdown_data()
+INITIAL_BOTTLE_LIST = fetch_bottle_list_optimized()
+
+# --- UI Generators ---
+def create_dynamic_input(id_base, label, is_repeated=False):
+    field_name = id_base.replace('new-', '').replace('upd-', '').replace('-', '_')
+    opts = INITIAL_OPTIONS.get(field_name, [{'label': '➕ Add New...', 'value': 'ADD_NEW_OPTION'}])
+    return dbc.Col([
+        dbc.Label(label),
+        dcc.Dropdown(id=f'{id_base}-dropdown', options=opts, placeholder="Select...", clearable=True, multi=is_repeated),
+        dbc.Input(id=f'{id_base}-input', type='text', placeholder="Type manual value...", style={'display': 'none', 'marginTop': '5px'}),
+    ], width=True, className="mb-3")
+
+# --- Layout ---
+app.layout = dbc.Container([
+    dcc.Store(id='bottle-meta-store'),
+
+    html.H1("🥃 Whisky Manager v4.3 AI", className="my-4 text-center"),
+    dbc.Alert(id='alert-output', is_open=False, duration=6000),
+
+    dbc.Tabs([
+        # === TAB 1: ADD NEW BOTTLE & AI ===
+        dbc.Tab(label="➕ Add New Bottle", children=[
+            dbc.Card(dbc.CardBody([
+                # AI Recommendation Section
+                dbc.Card([
+                    dbc.CardHeader(html.H5("🤖 AI Sommelier", className="m-0")),
+                    dbc.CardBody([
+                        html.P("Get purchase recommendations based on your current collection stats and budget."),
+                        dbc.Button("Get AI Recommendations", id='btn-ai-recommend', color="info", outline=True, size="sm"),
+                        dcc.Loading(html.Div(id='ai-output-area', className="mt-3 p-2", style={'backgroundColor': '#f0f8ff', 'borderRadius': '5px'}))
+                    ])
+                ], className="mb-4 border-info"),
+
+                # Manual Entry Form
+                html.H5("Manual Entry", className="mb-3"),
+                dbc.Row([
+                    create_dynamic_input('new-bottle_name', "Bottle Name"),
+                    create_dynamic_input('new-distillery', "Distillery"),
+                    create_dynamic_input('new-alcohol_type', "Alcohol Type"),
+                ]),
+                dbc.Row([
+                    dbc.Col([dbc.Label("Age"), dbc.Input(id='new-age', type='number')], width=2),
+                    dbc.Col([dbc.Label("ABV"), dbc.Input(id='new-abv', type='number', step=0.1)], width=2),
+                    create_dynamic_input('new-origin_country', "Country"),
+                    create_dynamic_input('new-region', "Region"),
+                ], className="mb-3"),
+                
+                html.Hr(),
+                html.H5("Price & Discounts", className="mb-3 text-success"),
+                dbc.Row([
+                    dbc.Col([
+                        dbc.Label("Was Discounted?"),
+                        dcc.Dropdown(id='new-was-discounted', options=BOOLEAN_OPTIONS, value=False, clearable=False)
+                    ], width=3),
+                ], className="mb-2"),
+
+                html.Div(id='price-container', children=[
+                    dbc.Row([
+                        dbc.Col([dbc.Label("Initial Price"), dbc.Input(id='new-price', type='number', placeholder="0.00")], width=3),
+                        html.Div(id='discount-fields-wrapper', style={'display': 'none', 'display': 'contents'}, children=[
+                            create_dynamic_input('new-discount_amount', "Discount %"),
+                            dbc.Col([dbc.Label("Discounted Price"), dbc.Input(id='new-discounted-price', type='number', placeholder="Auto-calc")], width=3),
+                        ])
+                    ])
+                ], className="mb-4"),
+
+                html.Hr(),
+                html.H5("Details & Inventory", className="mb-3"),
+                dbc.Row([
+                    create_dynamic_input('new-casks_aged_in', "Casks", True),
+                    create_dynamic_input('new-nose', "Nose", True),
+                    create_dynamic_input('new-palette', "Palette", True),
+                ]),
+                dbc.Row([
+                    create_dynamic_input('new-orignal_volume', "Vol (ml)"),
+                    dbc.Col([dbc.Label("Purchase Date"), dcc.DatePickerSingle(id='new-purchase_date', display_format='YYYY-MM-DD', date=datetime.now().date())], width=2),
+                    dbc.Col([dbc.Label("Opening Date"), dcc.DatePickerSingle(id='new-opening_date', display_format='YYYY-MM-DD')], width=2),
+                    dbc.Col([dbc.Label("Initial Stock %"), dbc.Input(id='new-stock-percent', type='number', value=100)], width=2),
+                    dbc.Col([dbc.Label("Qty"), dbc.Input(id='new-bottle-count', type='number', value=1)], width=2),
+                ], className="mb-4"),
+                dbc.Row([
+                    dbc.Col([dbc.Label("Limited?"), dcc.Dropdown(id='new-limited', options=BOOLEAN_OPTIONS, value=False)], width=3),
+                    dbc.Col([dbc.Label("Special?"), dcc.Dropdown(id='new-special', options=BOOLEAN_OPTIONS, value=False)], width=3),
+                    dbc.Col([dbc.Label("Gift?"), dcc.Dropdown(id='new-was-gift', options=BOOLEAN_OPTIONS, value=False)], width=3),
+                ]),
+                
+                dbc.Button("Insert Bottle(s)", id='submit-new-btn', color="success", className="w-100 mt-5"),
+                
+            ]), className="mt-3")
+        ]),
+
+        # === TAB 2: UPDATE ===
+        dbc.Tab(label="🔄 Update Stock Level", children=[
+            dbc.Card(dbc.CardBody([
+                dbc.Row([
+                    # Left Column: Selection & Randomizer
+                    dbc.Col([
+                        html.H4("Select Bottle", className="mb-3"),
+                        dcc.Dropdown(id='update-selector', options=INITIAL_BOTTLE_LIST, placeholder="Search..."),
+                        
+                        html.Hr(),
+                        dbc.Card([
+                            dbc.CardHeader("🎲 Random Dram Generator"),
+                            dbc.CardBody([
+                                html.P("Suggests a whisky you haven't drunk in > 7 days.", className="small text-muted"),
+                                dbc.Button("Suggest a Dram", id='btn-random-dram', color="dark", outline=True, className="w-100 mb-2"),
+                                html.Div(id='random-dram-output', className="text-center font-weight-bold text-primary")
+                            ])
+                        ], className="mb-3 border-dark"),
+
+                        html.Div(id='bottle-details-display', className="mb-3 text-center"),
+                        
+                        # Calculator
+                        dbc.Card([
+                            dbc.CardBody([
+                                dbc.Row([
+                                    dbc.Col([dbc.Label("Pour (ml)"), dbc.Input(id='pour-size', type='number', value=40)], width=4),
+                                    dbc.Col([dbc.Label("Glasses"), dbc.Input(id='glass-count', type='number', value=1)], width=4),
+                                    dbc.Col([dbc.Label("Action"), dbc.Button("Drink!", id='btn-calculate-pour', color="warning", outline=True, className="w-100")], width=4),
+                                ]),
+                            ])
+                        ], className="mb-3 bg-light"),
+                        
+                        dbc.Button("Update Stock Level (Save)", id='submit-upd-btn', color="primary", className="w-100 mt-2"),
+                    ], width=5),
+
+                    # Right Column: Visualizer
+                    dbc.Col([
+                        html.H4("Adjust Level", className="text-center mb-4"),
+                        dbc.Row([
+                            dbc.Col([
+                                dcc.Slider(id='stock-slider', min=0, max=100, step=0.1, value=100, vertical=True, verticalHeight=400,
+                                         marks={0: 'Empty', 25: '25%', 50: '50%', 75: '75%', 100: 'Full'})
+                            ], width=2, className="d-flex justify-content-center"),
+                            dbc.Col([
+                                html.Div(style={'width': '120px', 'height': '400px', 'border': '4px solid #333', 'borderRadius': '10px 10px 5px 5px', 'position': 'relative', 'backgroundColor': '#f8f9fa', 'margin': '0 auto'}, 
+                                         children=[html.Div(id='liquid-fill', style={'width': '100%', 'backgroundColor': '#d35400', 'position': 'absolute', 'bottom': '0', 'transition': 'height 0.3s ease', 'height': '100%'})])
+                            ], width=8)
+                        ], justify="center"),
+                        html.H5(id='current-stock-display', className="mt-3 text-info text-center", children="Select a bottle"),
+                    ], width=7)
+                ])
+            ]), className="mt-3")
+        ]),
+    ])
+], className="pb-5")
+
+# --- CALLBACKS ---
+
+# 1. UI Toggles
+ALL_INPUT_IDS = [f'new-{f}' for f in DYNAMIC_FIELDS_BASE]
+for field in ALL_INPUT_IDS:
+    @app.callback(Output(f'{field}-input', 'style'), Input(f'{field}-dropdown', 'value'))
+    def toggle_input(val):
+        if (isinstance(val, list) and 'ADD_NEW_OPTION' in val) or val == 'ADD_NEW_OPTION': return {'display': 'block', 'marginTop': '5px'}
+        return {'display': 'none'}
+
+@app.callback(Output('discount-fields-wrapper', 'style'), Input('new-was-discounted', 'value'))
+def toggle_discount_section(v): return {'display': 'contents'} if v else {'display': 'none'}
+
+# 2. Price Logic
+@app.callback(
+    [Output('new-discounted-price', 'value'), Output('new-price', 'value')],
+    [Input('new-price', 'value'), Input('new-discounted-price', 'value'), Input('new-discount_amount-dropdown', 'value'), Input('new-discount_amount-input', 'value')],
+    prevent_initial_call=True
+)
+def calculate_prices(price_val, discounted_val, disc_drop, disc_input):
+    ctx_id = ctx.triggered[0]['prop_id'].split('.')[0]
+    disc_percent = float(disc_input) if (disc_drop == 'ADD_NEW_OPTION' and disc_input) else (float(disc_drop) if disc_drop and disc_drop != 'ADD_NEW_OPTION' else 0.0)
+    factor = (1 - (disc_percent / 100))
+    if factor == 0: return no_update, no_update
+
+    if ctx_id == 'new-price' or 'discount' in ctx_id:
+        if price_val: return round(float(price_val) * factor, 2), no_update
+    elif ctx_id == 'new-discounted-price':
+        if discounted_val: return no_update, round(float(discounted_val) / factor, 2)
+    return no_update, no_update
+
+# 3. Fetch Metadata
+@app.callback(Output('bottle-meta-store', 'data'), Input('update-selector', 'value'))
+def fetch_bottle_metadata(bottle_id):
+    if not bottle_id: return no_update
+    try:
+        query = f"SELECT stock_status_per, bottle_name, orignal_volume FROM `{TABLE_REF}` WHERE bottle_id = {bottle_id}"
+        res = list(client.query(query).result())[0]
+        return {'bid': bottle_id, 'name': res.bottle_name, 'vol': res.orignal_volume or 700, 'stock': float(res.stock_status_per or 100)}
+    except: return no_update
+
+# 4. RANDOM DRAM GENERATOR (UPDATED to Sync Dropdown)
+@app.callback(
+    [Output('random-dram-output', 'children'), Output('update-selector', 'value')],
+    Input('btn-random-dram', 'n_clicks'), 
+    prevent_initial_call=True
+)
+def generate_random_dram(n):
+    if not client: return "DB Error", no_update
+    try:
+        query = f"""
+        WITH LastDrink AS (
+            SELECT bottle_id, MAX(update_time) as last_sip 
+            FROM `{HISTORY_TABLE_REF}`  
+            GROUP BY bottle_id
+        )
+        SELECT t1.bottle_name, t1.bottle_id, t1.region
+        FROM `{TABLE_REF}` t1
+        LEFT JOIN LastDrink t2 ON t1.bottle_id = t2.bottle_id
+        WHERE t1.stock_status_per > 0
+        and t1.alcohol_type in ('Single Malt Whisky','Blended Scotch Whisky')
+        AND (t2.last_sip IS NULL OR t2.last_sip < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY))
+        """
+        rows = list(client.query(query).result())
+        if not rows: return "No eligible bottles (all drunk recently or empty!)", no_update
+        
+        choice = random.choice(rows)
+        
+        # Display Element
+        display = html.Div([
+            html.H5(f"🥃 {choice.bottle_name}", className="mb-0"),
+            html.Small(f"ID: {choice.bottle_id} | Region: {choice.region}")
+        ])
+        
+        # Return Display AND the Bottle ID to update the dropdown
+        return display, choice.bottle_id
+        
+    except Exception as e: return f"Error: {e}", no_update
+
+# 5. AI RECOMMENDATION
+@app.callback(Output('ai-output-area', 'children'), Input('btn-ai-recommend', 'n_clicks'), prevent_initial_call=True)
+def generate_ai_rec(n):
+    if not ai_client: return dbc.Alert("GenAI Client not initialized.", color="danger")
+    try:
+        profile_text = get_user_flavor_profile()
+        prompt = f"""
+        Act as a master Whisky Sommelier.
+        My Collection Stats: {profile_text}
+        Based on this, scour your knowledge base and recommend 3 specific whisky bottles I should buy next that fit my flavor profile and average monthly budget spent of whisky, but offer something slightly interesting/new that I DONT HAVE ALREADY IN MY INVENTORY. AND PLEASE DON'T GIVE ME PEATED WHISKIES AT ALL!
+        Format as a Markdown list and add pallate and nose attribute per each bottle. Include estimated price and why it fits. Return the results in Shekels and search the whiskies in local israeli alcohol stores.
+        """
+        response = ai_client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
+        return dcc.Markdown(response.text)
+    except Exception as e:
+        return dbc.Alert(f"AI Error: {e}", color="danger")
+
+# 6. Master Visual Update
+@app.callback(
+    [Output('liquid-fill', 'style'), Output('stock-slider', 'value'), Output('current-stock-display', 'children'), Output('bottle-details-display', 'children')],
+    [Input('stock-slider', 'value'), Input('bottle-meta-store', 'data'), Input('btn-calculate-pour', 'n_clicks')],
+    [State('pour-size', 'value'), State('glass-count', 'value')]
+)
+def master_visual_update(slider_val, store_data, n_clicks, pour_size, glass_count):
+    ctx_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
+    current_val = slider_val if slider_val is not None else 100
+    name_display = "Select a bottle"
+    details_html = []
+
+    if ctx_id == 'bottle-meta-store' and store_data:
+        current_val = store_data['stock']
+        name_display = f"{store_data['name']}: {current_val}%"
+        details_html = [dbc.Badge(f"Total: {store_data['vol']}ml", color="dark", className="mr-2"), dbc.Badge(f"Current: {int(store_data['vol']*(current_val/100))}ml", color="info")]
+    
+    elif ctx_id == 'btn-calculate-pour' and store_data:
+        current_ml = (slider_val / 100) * store_data['vol']
+        remove_ml = (pour_size * glass_count)
+        new_ml = max(current_ml - remove_ml, 0)
+        current_val = round((new_ml / store_data['vol']) * 100, 2)
+        name_display = f"New Level: {current_val}% (-{remove_ml}ml)"
+        details_html = [dbc.Badge(f"Total: {store_data['vol']}ml", color="dark", className="mr-2"), dbc.Badge(f"Remaining: {int(new_ml)}ml", color="warning")]
+
+    elif store_data:
+        current_ml = int(store_data['vol'] * (current_val/100))
+        name_display = f"Manual: {current_val}% (~{current_ml}ml)"
+        details_html = [dbc.Badge(f"Total: {store_data['vol']}ml", color="dark", className="mr-2"), dbc.Badge(f"Current: {current_ml}ml", color="info")]
+
+    style = {'width': '100%', 'backgroundColor': '#d35400', 'position': 'absolute', 'bottom': '0', 'transition': 'height 0.3s ease', 'height': f'{current_val}%'}
+    return style, current_val, name_display, details_html
+
+# 7. INSERT BOTTLE (FIXED: Now inserts to history as well)
+@app.callback(
+    [Output('alert-output', 'children'), Output('alert-output', 'is_open'), Output('alert-output', 'color'), 
+     Output('update-selector', 'options'),
+     *[Output(f'new-{f}-dropdown', 'value') for f in DYNAMIC_FIELDS_BASE],
+     *[Output(f'new-{f}-input', 'value') for f in DYNAMIC_FIELDS_BASE],
+     Output('new-age', 'value'), Output('new-abv', 'value'), 
+     Output('new-price', 'value', allow_duplicate=True), Output('new-discounted-price', 'value', allow_duplicate=True),
+     Output('new-purchase_date', 'date'), Output('new-opening_date', 'date'), Output('new-stock-percent', 'value'), Output('new-bottle-count', 'value'),
+     *[Output(f'new-{f}-dropdown', 'options') for f in DYNAMIC_FIELDS_BASE]
+    ],
+    Input('submit-new-btn', 'n_clicks'),
+    [State(f'new-{f}-dropdown', 'value') for f in DYNAMIC_FIELDS_BASE] + 
+    [State(f'new-{f}-input', 'value') for f in DYNAMIC_FIELDS_BASE] +
+    [State('new-age', 'value'), State('new-abv', 'value'), 
+     State('new-price', 'value'), State('new-discounted-price', 'value'),
+     State('new-limited', 'value'), State('new-special', 'value'), State('new-was-gift', 'value'), State('new-was-discounted', 'value'),
+     State('new-purchase_date', 'date'), State('new-opening_date', 'date'), State('new-stock-percent', 'value'), State('new-bottle-count', 'value')],
+    prevent_initial_call=True
+)
+def insert_bottle_loop(n_clicks, *args):
+    num_dyn = len(DYNAMIC_FIELDS_BASE)
+    dropdowns = args[:num_dyn]
+    inputs = args[num_dyn : num_dyn*2]
+    age, abv, price, discounted_price, limited, special, was_gift, was_discounted, purch_date, open_date, stock_pct, count_qty = args[num_dyn*2:]
+
+    def resolve(drop, inp, is_rep=False):
+        if is_rep:
+            if not drop: return []
+            base = [v for v in drop if v != 'ADD_NEW_OPTION'] if 'ADD_NEW_OPTION' in drop else drop
+            if inp: base.extend([x.strip() for x in inp.split(',') if x.strip()])
+            return base
+        return inp if drop == 'ADD_NEW_OPTION' else drop
+
+    b_name = resolve(dropdowns[0], inputs[0])
+    if not b_name: return "❌ Name required.", True, "danger", no_update, *[no_update]*(42-4)
+
+    try:
+        row_id_res = list(client.query(f"SELECT COALESCE(MAX(bottle_id), 0) as m FROM `{TABLE_REF}`").result())
+        row_id = row_id_res[0].m
+        qty = int(count_qty or 1)
+        
+        for i in range(1, qty + 1):
+            new_id = row_id + i
+            full_empty = False if (stock_pct and stock_pct > 0) else True
+            final_price = float(price) if price else None
+            
+            # 1. Main Table Insert
+            q_ins = f"""INSERT INTO `{TABLE_REF}` (bottle_id, bottle_name, distillery, alcohol_type, origin_country, region, casks_aged_in, nose, palette, age, alcohol_percentage, price, limited_edition, special_bottling, was_a_gift, stock_status_per, full_or_empy, orignal_volume, date_of_purchase, opening_date, bottle_counter, was_discounted, discount_amount, discounted_price, time_of_registration) VALUES ({new_id}, '{b_name}', '{resolve(dropdowns[1], inputs[1]) or ''}', '{resolve(dropdowns[2], inputs[2]) or ''}', '{resolve(dropdowns[3], inputs[3]) or ''}', '{resolve(dropdowns[4], inputs[4]) or ''}', {list(resolve(dropdowns[5], inputs[5], True))}, {list(resolve(dropdowns[6], inputs[6], True))}, {list(resolve(dropdowns[7], inputs[7], True))}, {age or 'NULL'}, {abv or 'NULL'}, {final_price or 'NULL'}, {str(limited).lower()}, {str(special).lower()}, {str(was_gift).lower()}, {stock_pct}, {str(full_empty).lower()}, {resolve(dropdowns[8], inputs[8]) or 700}, '{purch_date}', {f"'{open_date}'" if open_date else 'NULL'}, 1, {str(was_discounted).lower()}, {resolve(dropdowns[9], inputs[9]) or 'NULL'}, {discounted_price or 'NULL'}, CURRENT_TIMESTAMP())"""
+            client.query(q_ins).result()
+
+            # 2. History Table Insert (The Fix)
+            # We use 'update_time' here because that is the schema used in the Update Callback (#8)
+            q_hist_init = f"""
+                INSERT INTO `{HISTORY_TABLE_REF}` 
+                (update_id, bottle_id, bottle_name, stock_status_per, update_time)
+                VALUES (
+                    (SELECT COALESCE(MAX(update_id), 0) + 1 FROM `{HISTORY_TABLE_REF}`),
+                    {new_id},
+                    '{b_name}',
+                    {stock_pct},
+                    CURRENT_TIMESTAMP()
+                )
+            """
+            client.query(q_hist_init).result()
+
+        fresh_list = fetch_bottle_list_optimized()
+        fresh_opts = fetch_all_dropdown_data()
+        new_opts_list = [fresh_opts.get(f, []) for f in DYNAMIC_FIELDS_BASE]
+        
+        reset_list = [None] * (num_dyn * 2) + [None, None, None, None, None, None, 100, 1]
+        return f"✅ Added {qty} bottles.", True, "success", fresh_list, *reset_list, *new_opts_list
+
+    except Exception as e:
+        return f"Insert Error: {e}", True, "danger", no_update, *[no_update]*(42-4)
+
+# 8. UPDATE STOCK SUBMIT
+@app.callback(
+    [Output('alert-output', 'children', allow_duplicate=True), 
+     Output('alert-output', 'is_open', allow_duplicate=True), 
+     Output('alert-output', 'color', allow_duplicate=True),
+     Output('update-selector', 'options', allow_duplicate=True),
+     Output('bottle-meta-store', 'data', allow_duplicate=True)
+    ],
+    Input('submit-upd-btn', 'n_clicks'),
+    [State('update-selector', 'value'), State('stock-slider', 'value')],
+    prevent_initial_call=True
+)
+def update_stock_submit(n_clicks, bid, stock_val):
+    if not bid: return "Select bottle first", True, "warning", no_update, no_update
+    
+    try:
+        is_empty = (stock_val == 0)
+        curr_row = list(client.query(f"SELECT stock_status_per, opening_date, bottle_name, orignal_volume FROM `{TABLE_REF}` WHERE bottle_id={bid}").result())[0]
+        
+        update_clauses = [f"stock_status_per = {stock_val}", f"full_or_empy = {str(is_empty).lower()}", "updating_time = CURRENT_TIMESTAMP()"]
+        
+        status_extra = ""
+        if stock_val < (curr_row.stock_status_per or 100):
+            if (curr_row.stock_status_per == 100 or curr_row.opening_date is None):
+                update_clauses.append(f"opening_date = '{datetime.now().date()}'")
+                status_extra = " (Auto-Opened)"
+        
+        q_upd = f"UPDATE `{TABLE_REF}` SET {', '.join(update_clauses)} WHERE bottle_id = {bid}"
+        client.query(q_upd).result()
+
+        q_hist = f"INSERT INTO `{HISTORY_TABLE_REF}` (update_id, bottle_id, bottle_name, stock_status_per, update_time) VALUES ((SELECT COALESCE(MAX(update_id),0)+1 FROM `{HISTORY_TABLE_REF}`), {bid}, '{curr_row.bottle_name}', {stock_val}, CURRENT_TIMESTAMP())"
+        client.query(q_hist).result()
+
+        new_list = fetch_bottle_list_optimized()
+        new_store_data = {'bid': bid, 'name': curr_row.bottle_name, 'vol': curr_row.orignal_volume or 700, 'stock': float(stock_val)}
+
+        return f"✅ Updated to {stock_val}%{status_extra}", True, "success", new_list, new_store_data
+
+    except Exception as e:
+        return f"Error: {e}", True, "danger", no_update, no_update
+
+if __name__ == '__main__':
+    app.run(debug=True, port=8055)
