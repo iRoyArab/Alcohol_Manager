@@ -17,7 +17,20 @@ TABLE_ID = "my_whisky_collection"
 HISTORY_TABLE_ID = "alcohol_update"
 
 # ⚠️ GEMINI API KEY
-GEMINI_API_KEY = "AIzaSyAPe_6VG52SmLZgXpzh-ZTIilQ4O98fv5E" 
+GEMINI_API_KEY = r"C:\Users\iroyp\OneDrive\שולחן העבודה\TELEGRAM\Telegram-Autoforwarder-master\gemini_key_api.txt"
+# Open and read
+try:
+    with open(GEMINI_API_KEY, "r", encoding="utf-8") as f:
+        # .strip() is crucial: it removes spaces and newlines from the start/end
+        GEMINI_API_KEY = f.read().strip()
+        
+    print("Key loaded successfully.")
+    # print(GEMINI_API_KEY) # Uncomment to verify, but be careful printing keys!
+
+except FileNotFoundError:
+    print(f"Error: The file was not found at {GEMINI_API_KEY}")
+except Exception as e:
+    print(f"An error occurred: {e}")
 
 TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 HISTORY_TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{HISTORY_TABLE_ID}"
