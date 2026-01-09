@@ -15,6 +15,7 @@ PROJECT_ID = "hopeful-flash-478009-b7"
 DATASET_ID = "Whisky_Collection"
 TABLE_ID = "my_whisky_collection"
 HISTORY_TABLE_ID = "alcohol_update"
+Forecast_id = "consumption_forecast"
 
 # ⚠️ GEMINI API KEY
 GEMINI_API_KEY = r"C:\Users\iroyp\OneDrive\שולחן העבודה\TELEGRAM\Telegram-Autoforwarder-master\gemini_key_api.txt"
@@ -34,6 +35,7 @@ except Exception as e:
 
 TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 HISTORY_TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{HISTORY_TABLE_ID}"
+FORECAST_TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{Forecast_id}"
 
 # --- Init Services ---
 try:
@@ -270,7 +272,7 @@ app.layout = dbc.Container([
                         dbc.Card([
                             dbc.CardBody([
                                 dbc.Row([
-                                    dbc.Col([dbc.Label("Pour (ml)"), dbc.Input(id='pour-size', type='number', value=40)], width=4),
+                                    dbc.Col([dbc.Label("Pour (ml)"), dbc.Input(id='pour-size', type='number', value=30)], width=4),
                                     dbc.Col([dbc.Label("Glasses"), dbc.Input(id='glass-count', type='number', value=1)], width=4),
                                     dbc.Col([dbc.Label("Action"), dbc.Button("Drink!", id='btn-calculate-pour', color="warning", outline=True, className="w-100")], width=4),
                                 ]),
@@ -337,10 +339,32 @@ def calculate_prices(price_val, discounted_val, disc_drop, disc_input):
 def fetch_bottle_metadata(bottle_id):
     if not bottle_id: return no_update
     try:
-        query = f"SELECT stock_status_per, bottle_name, orignal_volume FROM `{TABLE_REF}` WHERE bottle_id = {bottle_id}"
+        # We join the Main Table with the Forecast View to get the date safely
+        query = f"""
+        SELECT 
+            t.stock_status_per, 
+            t.bottle_name, 
+            t.orignal_volume,
+            f.predicted_finish_date
+        FROM `{TABLE_REF}` t
+        LEFT JOIN `{FORECAST_TABLE_REF}` f ON t.bottle_id = f.bottle_id
+        WHERE t.bottle_id = {bottle_id}
+        """
         res = list(client.query(query).result())[0]
-        return {'bid': bottle_id, 'name': res.bottle_name, 'vol': res.orignal_volume or 700, 'stock': float(res.stock_status_per or 100)}
-    except: return no_update
+        
+        # Format date to string if it exists
+        pred_date = res.predicted_finish_date.strftime('%Y-%m-%d') if res.predicted_finish_date else None
+
+        return {
+            'bid': bottle_id, 
+            'name': res.bottle_name, 
+            'vol': res.orignal_volume or 700, 
+            'stock': float(res.stock_status_per or 100),
+            'forecast_date': pred_date  # <--- Added Field
+        }
+    except Exception as e: 
+        print(f"Metadata Fetch Error: {e}")
+        return no_update
 
 # 4. RANDOM DRAM GENERATOR (UPDATED to Sync Dropdown)
 @app.callback(
@@ -357,7 +381,7 @@ def generate_random_dram(n):
             FROM `{HISTORY_TABLE_REF}`  
             GROUP BY bottle_id
         )
-        SELECT t1.bottle_name, t1.bottle_id, t1.region
+        SELECT t1.bottle_name, t1.bottle_id, t1.region, t1.distillery
         FROM `{TABLE_REF}` t1
         LEFT JOIN LastDrink t2 ON t1.bottle_id = t2.bottle_id
         WHERE t1.stock_status_per > 0
@@ -371,7 +395,7 @@ def generate_random_dram(n):
         
         # Display Element
         display = html.Div([
-            html.H5(f"🥃 {choice.bottle_name}", className="mb-0"),
+            html.H5(f"🥃 {choice.distillery} - {choice.bottle_name}", className="mb-0"),
             html.Small(f"ID: {choice.bottle_id} | Region: {choice.region}")
         ])
         
@@ -380,17 +404,35 @@ def generate_random_dram(n):
         
     except Exception as e: return f"Error: {e}", no_update
 
+
+def get_bottles_names ():
+    if not client: return "DB Error"
+    try:
+        query = f"""
+            Select distinct bottle_name
+            from `{TABLE_REF}`
+        """
+        rows = list(client.query(query).result())
+        
+        if not rows: 
+            return []
+        else:
+            return rows
+    except Exception as e: return f"Error: {e}"
+    
 # 5. AI RECOMMENDATION
 @app.callback(Output('ai-output-area', 'children'), Input('btn-ai-recommend', 'n_clicks'), prevent_initial_call=True)
 def generate_ai_rec(n):
     if not ai_client: return dbc.Alert("GenAI Client not initialized.", color="danger")
     try:
         profile_text = get_user_flavor_profile()
+        bottles_list = get_bottles_names()
         prompt = f"""
         Act as a master Whisky Sommelier.
         My Collection Stats: {profile_text}
         Based on this, scour your knowledge base and recommend 3 specific whisky bottles I should buy next that fit my flavor profile and average monthly budget spent of whisky, but offer something slightly interesting/new that I DONT HAVE ALREADY IN MY INVENTORY. AND PLEASE DON'T GIVE ME PEATED WHISKIES AT ALL!
         Format as a Markdown list and add pallate and nose attribute per each bottle. Include estimated price and why it fits. Return the results in Shekels and search the whiskies in local israeli alcohol stores.
+        Make sure the bottles you return don't already exist in my whisky collection : {bottles_list}
         """
         response = ai_client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
         return dcc.Markdown(response.text)
@@ -409,10 +451,21 @@ def master_visual_update(slider_val, store_data, n_clicks, pour_size, glass_coun
     name_display = "Select a bottle"
     details_html = []
 
+    # Helper to create badges
+    def create_badges(total_vol, current_vol, f_date):
+        badges = [
+            dbc.Badge(f"Total: {total_vol}ml", color="dark", className="mr-2"),
+            dbc.Badge(f"Current: {int(current_vol)}ml", color="info", className="mr-2")
+        ]
+        if f_date:
+            badges.append(dbc.Badge(f"Est. Finish: {f_date}", color="danger"))
+        return badges
+
     if ctx_id == 'bottle-meta-store' and store_data:
         current_val = store_data['stock']
         name_display = f"{store_data['name']}: {current_val}%"
-        details_html = [dbc.Badge(f"Total: {store_data['vol']}ml", color="dark", className="mr-2"), dbc.Badge(f"Current: {int(store_data['vol']*(current_val/100))}ml", color="info")]
+        current_ml = store_data['vol']*(current_val/100)
+        details_html = create_badges(store_data['vol'], current_ml, store_data.get('forecast_date'))
     
     elif ctx_id == 'btn-calculate-pour' and store_data:
         current_ml = (slider_val / 100) * store_data['vol']
@@ -420,12 +473,14 @@ def master_visual_update(slider_val, store_data, n_clicks, pour_size, glass_coun
         new_ml = max(current_ml - remove_ml, 0)
         current_val = round((new_ml / store_data['vol']) * 100, 2)
         name_display = f"New Level: {current_val}% (-{remove_ml}ml)"
-        details_html = [dbc.Badge(f"Total: {store_data['vol']}ml", color="dark", className="mr-2"), dbc.Badge(f"Remaining: {int(new_ml)}ml", color="warning")]
+        # Note: Date won't update instantly here until saved, so we keep the old date or show generic
+        details_html = [dbc.Badge(f"Total: {store_data['vol']}ml", color="dark", className="mr-2"), 
+                        dbc.Badge(f"Remaining: {int(new_ml)}ml", color="warning")]
 
     elif store_data:
         current_ml = int(store_data['vol'] * (current_val/100))
         name_display = f"Manual: {current_val}% (~{current_ml}ml)"
-        details_html = [dbc.Badge(f"Total: {store_data['vol']}ml", color="dark", className="mr-2"), dbc.Badge(f"Current: {current_ml}ml", color="info")]
+        details_html = create_badges(store_data['vol'], current_ml, store_data.get('forecast_date'))
 
     style = {'width': '100%', 'backgroundColor': '#d35400', 'position': 'absolute', 'bottom': '0', 'transition': 'height 0.3s ease', 'height': f'{current_val}%'}
     return style, current_val, name_display, details_html
@@ -522,12 +577,13 @@ def update_stock_submit(n_clicks, bid, stock_val):
     if not bid: return "Select bottle first", True, "warning", no_update, no_update
     
     try:
+        # 1. Update Main Table
         is_empty = (stock_val == 0)
         curr_row = list(client.query(f"SELECT stock_status_per, opening_date, bottle_name, orignal_volume FROM `{TABLE_REF}` WHERE bottle_id={bid}").result())[0]
         
         update_clauses = [f"stock_status_per = {stock_val}", f"full_or_empy = {str(is_empty).lower()}", "updating_time = CURRENT_TIMESTAMP()"]
-        
         status_extra = ""
+        
         if stock_val < (curr_row.stock_status_per or 100):
             if (curr_row.stock_status_per == 100 or curr_row.opening_date is None):
                 update_clauses.append(f"opening_date = '{datetime.now().date()}'")
@@ -536,11 +592,32 @@ def update_stock_submit(n_clicks, bid, stock_val):
         q_upd = f"UPDATE `{TABLE_REF}` SET {', '.join(update_clauses)} WHERE bottle_id = {bid}"
         client.query(q_upd).result()
 
-        q_hist = f"INSERT INTO `{HISTORY_TABLE_REF}` (update_id, bottle_id, bottle_name, stock_status_per, update_time) VALUES ((SELECT COALESCE(MAX(update_id),0)+1 FROM `{HISTORY_TABLE_REF}`), {bid}, '{curr_row.bottle_name}', {stock_val}, CURRENT_TIMESTAMP())"
+        # 2. Insert into History (This triggers the View change logic)
+        q_hist = f"""
+            INSERT INTO `{HISTORY_TABLE_REF}` (update_id, bottle_id, bottle_name, stock_status_per, update_time) 
+            VALUES ((SELECT COALESCE(MAX(update_id),0)+1 FROM `{HISTORY_TABLE_REF}`), {bid}, '{curr_row.bottle_name}', {stock_val}, CURRENT_TIMESTAMP())
+        """
         client.query(q_hist).result()
 
+        # 3. RE-FETCH Forecast Date
+        # Since we just added a data point, the View will calculate a new date immediately.
+        q_forecast = f"SELECT predicted_finish_date FROM `{FORECAST_TABLE_REF}` WHERE bottle_id = {bid}"
+        forecast_res = list(client.query(q_forecast).result())
+        
+        new_date = None
+        if forecast_res and forecast_res[0].predicted_finish_date:
+            new_date = forecast_res[0].predicted_finish_date.strftime('%Y-%m-%d')
+
         new_list = fetch_bottle_list_optimized()
-        new_store_data = {'bid': bid, 'name': curr_row.bottle_name, 'vol': curr_row.orignal_volume or 700, 'stock': float(stock_val)}
+        
+        # Update the store with the NEW values + NEW date
+        new_store_data = {
+            'bid': bid, 
+            'name': curr_row.bottle_name, 
+            'vol': curr_row.orignal_volume or 700, 
+            'stock': float(stock_val),
+            'forecast_date': new_date  # <--- Updated Date
+        }
 
         return f"✅ Updated to {stock_val}%{status_extra}", True, "success", new_list, new_store_data
 
