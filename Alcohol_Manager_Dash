@@ -431,7 +431,7 @@ def generate_ai_rec(n):
         Act as a master Whisky Sommelier.
         My Collection Stats: {profile_text}
         Based on this, scour your knowledge base and recommend 3 specific whisky bottles I should buy next that fit my flavor profile and average monthly budget spent of whisky, but offer something slightly interesting/new that I DONT HAVE ALREADY IN MY INVENTORY. AND PLEASE DON'T GIVE ME PEATED WHISKIES AT ALL!
-        Format as a Markdown list and add pallate and nose attribute per each bottle. Include estimated price and why it fits. Return the results in Shekels and search the whiskies in local israeli alcohol stores.
+        Format as a Markdown list and add abv and pallate and nose attribute per each bottle. Include estimated price and why it fits. Return the results in Shekels and search the whiskies in local israeli alcohol stores.
         Make sure the bottles you return don't already exist in my whisky collection : {bottles_list}
         """
         response = ai_client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
@@ -485,7 +485,7 @@ def master_visual_update(slider_val, store_data, n_clicks, pour_size, glass_coun
     style = {'width': '100%', 'backgroundColor': '#d35400', 'position': 'absolute', 'bottom': '0', 'transition': 'height 0.3s ease', 'height': f'{current_val}%'}
     return style, current_val, name_display, details_html
 
-# 7. INSERT BOTTLE (FIXED: Now inserts to history as well)
+# 7. INSERT BOTTLE (FIXED: With SQL Escaping)
 @app.callback(
     [Output('alert-output', 'children'), Output('alert-output', 'is_open'), Output('alert-output', 'color'), 
      Output('update-selector', 'options'),
@@ -516,8 +516,14 @@ def insert_bottle_loop(n_clicks, *args):
             if not drop: return []
             base = [v for v in drop if v != 'ADD_NEW_OPTION'] if 'ADD_NEW_OPTION' in drop else drop
             if inp: base.extend([x.strip() for x in inp.split(',') if x.strip()])
-            return base
-        return inp if drop == 'ADD_NEW_OPTION' else drop
+            # Escape single quotes in lists
+            return [str(x).replace("'", "\\'") for x in base]
+        
+        val = inp if drop == 'ADD_NEW_OPTION' else drop
+        # Escape single quotes in strings
+        if isinstance(val, str):
+            return val.replace("'", "\\'")
+        return val
 
     b_name = resolve(dropdowns[0], inputs[0])
     if not b_name: return "❌ Name required.", True, "danger", no_update, *[no_update]*(42-4)
@@ -530,14 +536,14 @@ def insert_bottle_loop(n_clicks, *args):
         for i in range(1, qty + 1):
             new_id = row_id + i
             full_empty = False if (stock_pct and stock_pct > 0) else True
-            final_price = float(price) if price else None
+            final_price = float(price) if price else 'NULL'
             
             # 1. Main Table Insert
-            q_ins = f"""INSERT INTO `{TABLE_REF}` (bottle_id, bottle_name, distillery, alcohol_type, origin_country, region, casks_aged_in, nose, palette, age, alcohol_percentage, price, limited_edition, special_bottling, was_a_gift, stock_status_per, full_or_empy, orignal_volume, date_of_purchase, opening_date, bottle_counter, was_discounted, discount_amount, discounted_price, time_of_registration) VALUES ({new_id}, '{b_name}', '{resolve(dropdowns[1], inputs[1]) or ''}', '{resolve(dropdowns[2], inputs[2]) or ''}', '{resolve(dropdowns[3], inputs[3]) or ''}', '{resolve(dropdowns[4], inputs[4]) or ''}', {list(resolve(dropdowns[5], inputs[5], True))}, {list(resolve(dropdowns[6], inputs[6], True))}, {list(resolve(dropdowns[7], inputs[7], True))}, {age or 'NULL'}, {abv or 'NULL'}, {final_price or 'NULL'}, {str(limited).lower()}, {str(special).lower()}, {str(was_gift).lower()}, {stock_pct}, {str(full_empty).lower()}, {resolve(dropdowns[8], inputs[8]) or 700}, '{purch_date}', {f"'{open_date}'" if open_date else 'NULL'}, 1, {str(was_discounted).lower()}, {resolve(dropdowns[9], inputs[9]) or 'NULL'}, {discounted_price or 'NULL'}, CURRENT_TIMESTAMP())"""
+            # Note: b_name and other strings are now escaped by the resolve function above
+            q_ins = f"""INSERT INTO `{TABLE_REF}` (bottle_id, bottle_name, distillery, alcohol_type, origin_country, region, casks_aged_in, nose, palette, age, alcohol_percentage, price, limited_edition, special_bottling, was_a_gift, stock_status_per, full_or_empy, orignal_volume, date_of_purchase, opening_date, bottle_counter, was_discounted, discount_amount, discounted_price, time_of_registration) VALUES ({new_id}, '{b_name}', '{resolve(dropdowns[1], inputs[1]) or ''}', '{resolve(dropdowns[2], inputs[2]) or ''}', '{resolve(dropdowns[3], inputs[3]) or ''}', '{resolve(dropdowns[4], inputs[4]) or ''}', {list(resolve(dropdowns[5], inputs[5], True))}, {list(resolve(dropdowns[6], inputs[6], True))}, {list(resolve(dropdowns[7], inputs[7], True))}, {age or 'NULL'}, {abv or 'NULL'}, {final_price}, {str(limited).lower()}, {str(special).lower()}, {str(was_gift).lower()}, {stock_pct}, {str(full_empty).lower()}, {resolve(dropdowns[8], inputs[8]) or 700}, '{purch_date}', {f"'{open_date}'" if open_date else 'NULL'}, 1, {str(was_discounted).lower()}, {resolve(dropdowns[9], inputs[9]) or 'NULL'}, {discounted_price or 'NULL'}, CURRENT_TIMESTAMP())"""
             client.query(q_ins).result()
 
-            # 2. History Table Insert (The Fix)
-            # We use 'update_time' here because that is the schema used in the Update Callback (#8)
+            # 2. History Table Insert
             q_hist_init = f"""
                 INSERT INTO `{HISTORY_TABLE_REF}` 
                 (update_id, bottle_id, bottle_name, stock_status_per, update_time)
@@ -561,7 +567,7 @@ def insert_bottle_loop(n_clicks, *args):
     except Exception as e:
         return f"Insert Error: {e}", True, "danger", no_update, *[no_update]*(42-4)
 
-# 8. UPDATE STOCK SUBMIT
+# 8. UPDATE STOCK SUBMIT (UPGRADED: With Forecast & Depletion Logic)
 @app.callback(
     [Output('alert-output', 'children', allow_duplicate=True), 
      Output('alert-output', 'is_open', allow_duplicate=True), 
@@ -577,51 +583,122 @@ def update_stock_submit(n_clicks, bid, stock_val):
     if not bid: return "Select bottle first", True, "warning", no_update, no_update
     
     try:
-        # 1. Update Main Table
-        is_empty = (stock_val == 0)
-        curr_row = list(client.query(f"SELECT stock_status_per, opening_date, bottle_name, orignal_volume FROM `{TABLE_REF}` WHERE bottle_id={bid}").result())[0]
+        # 1. Fetch Current Data AND Forecast Data together
+        # We need the forecast dates BEFORE we insert into history to calculate flags
+        q_get_data = f"""
+        SELECT 
+            t.stock_status_per, 
+            t.opening_date, 
+            t.bottle_name, 
+            t.orignal_volume,
+            f.est_consumption_date, 
+            f.predicted_finish_date
+        FROM `{TABLE_REF}` t
+        LEFT JOIN `{FORECAST_TABLE_REF}` f ON t.bottle_id = f.bottle_id
+        WHERE t.bottle_id = {bid}
+        """
         
-        update_clauses = [f"stock_status_per = {stock_val}", f"full_or_empy = {str(is_empty).lower()}", "updating_time = CURRENT_TIMESTAMP()"]
+        rows = list(client.query(q_get_data).result())
+        if not rows:
+            return "Error: Bottle not found in DB", True, "danger", no_update, no_update
+            
+        curr_row = rows[0]
+        
+        # --- LOGIC: Calculate Flags ---
+        today = datetime.now().date()
+        
+        # A. Consumption Flag Logic
+        # Default to NULL (as string for SQL)
+        cons_flag_sql = "NULL" 
+        
+        if curr_row.est_consumption_date:
+            est_date = curr_row.est_consumption_date
+            if today < est_date:
+                cons_flag_sql = "'Earlier Then Forecast'"
+            elif today == est_date:
+                cons_flag_sql = "'Right on Schedule'"
+            else:
+                # user requested: 'Later Then Scheduele '
+                cons_flag_sql = "'Later Then Scheduele '"
+
+        # B. Depletion Flag Logic
+        # Only relevant if stock becomes 0
+        depletion_flag_sql = "NULL"
+        
+        if float(stock_val) == 0 and curr_row.predicted_finish_date:
+            fin_date = curr_row.predicted_finish_date
+            if today < fin_date:
+                depletion_flag_sql = "'Earlier Then Forecast'"
+            elif today == fin_date:
+                 # user requested: 'Right on  Sceduele '
+                depletion_flag_sql = "'Right on  Sceduele '"
+            else:
+                depletion_flag_sql = "'Later Then Forecast'"
+
+        # --- DATABASE UPDATES ---
+
+        # 2. Update Main Table (Inventory)
+        is_empty = (stock_val == 0)
+        
+        # Escape the name for the history query
+        safe_bottle_name = curr_row.bottle_name.replace("'", "\\'") if curr_row.bottle_name else ""
+
+        update_clauses = [
+            f"stock_status_per = {stock_val}", 
+            f"full_or_empy = {str(is_empty).lower()}", 
+            "updating_time = CURRENT_TIMESTAMP()"
+        ]
         status_extra = ""
         
+        # Auto-open logic if not already opened
         if stock_val < (curr_row.stock_status_per or 100):
             if (curr_row.stock_status_per == 100 or curr_row.opening_date is None):
-                update_clauses.append(f"opening_date = '{datetime.now().date()}'")
+                update_clauses.append(f"opening_date = '{today}'")
                 status_extra = " (Auto-Opened)"
         
         q_upd = f"UPDATE `{TABLE_REF}` SET {', '.join(update_clauses)} WHERE bottle_id = {bid}"
         client.query(q_upd).result()
 
-        # 2. Insert into History (This triggers the View change logic)
+        # 3. Insert into History (With New Flags)
         q_hist = f"""
-            INSERT INTO `{HISTORY_TABLE_REF}` (update_id, bottle_id, bottle_name, stock_status_per, update_time) 
-            VALUES ((SELECT COALESCE(MAX(update_id),0)+1 FROM `{HISTORY_TABLE_REF}`), {bid}, '{curr_row.bottle_name}', {stock_val}, CURRENT_TIMESTAMP())
+            INSERT INTO `{HISTORY_TABLE_REF}` 
+            (update_id, bottle_id, bottle_name, stock_status_per, update_time, consumption_flag, depletion_flag) 
+            VALUES (
+                (SELECT COALESCE(MAX(update_id),0)+1 FROM `{HISTORY_TABLE_REF}`), 
+                {bid}, 
+                '{safe_bottle_name}', 
+                {stock_val}, 
+                CURRENT_TIMESTAMP(),
+                {cons_flag_sql},
+                {depletion_flag_sql}
+            )
         """
         client.query(q_hist).result()
 
-        # 3. RE-FETCH Forecast Date
-        # Since we just added a data point, the View will calculate a new date immediately.
-        q_forecast = f"SELECT predicted_finish_date FROM `{FORECAST_TABLE_REF}` WHERE bottle_id = {bid}"
-        forecast_res = list(client.query(q_forecast).result())
+        # 4. Prepare UI Updates
+        # We already have the forecast date from the initial fetch (curr_row.predicted_finish_date)
+        # However, if the logic relies on a live recalc of the forecast *after* the update, 
+        # we might need to re-fetch. Usually, forecast views update after some time or scheduled query.
+        # For now, we use the date we just fetched to update the UI badge.
         
-        new_date = None
-        if forecast_res and forecast_res[0].predicted_finish_date:
-            new_date = forecast_res[0].predicted_finish_date.strftime('%Y-%m-%d')
+        new_date_str = None
+        if curr_row.predicted_finish_date:
+            new_date_str = curr_row.predicted_finish_date.strftime('%Y-%m-%d')
 
         new_list = fetch_bottle_list_optimized()
         
-        # Update the store with the NEW values + NEW date
         new_store_data = {
             'bid': bid, 
             'name': curr_row.bottle_name, 
             'vol': curr_row.orignal_volume or 700, 
             'stock': float(stock_val),
-            'forecast_date': new_date  # <--- Updated Date
+            'forecast_date': new_date_str 
         }
 
         return f"✅ Updated to {stock_val}%{status_extra}", True, "success", new_list, new_store_data
 
     except Exception as e:
+        print(f"Update Error: {e}") # Print to console for debugging
         return f"Error: {e}", True, "danger", no_update, no_update
 
 if __name__ == '__main__':
