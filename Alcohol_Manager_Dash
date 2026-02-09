@@ -9,29 +9,23 @@ import os
 import random
 
 # --- Configuration ---
-# ⚠️ REPLACE WITH YOUR ACTUAL PATHS
 SERVICE_ACCOUNT_FILE = r"C:\Users\iroyp\OneDrive\שולחן העבודה\TELEGRAM\Telegram-Autoforwarder-master\hopeful-flash-478009-b7-1acfbd3ccca6.json"
 PROJECT_ID = "hopeful-flash-478009-b7"
 DATASET_ID = "Whisky_Collection"
 TABLE_ID = "my_whisky_collection"
 HISTORY_TABLE_ID = "alcohol_update"
 Forecast_id = "consumption_forecast"
-
-# ⚠️ GEMINI API KEY
 GEMINI_API_KEY = r"C:\Users\iroyp\OneDrive\שולחן העבודה\TELEGRAM\Telegram-Autoforwarder-master\gemini_key_api.txt"
-# Open and read
+
+# Open and read API Key
 try:
     with open(GEMINI_API_KEY, "r", encoding="utf-8") as f:
-        # .strip() is crucial: it removes spaces and newlines from the start/end
         GEMINI_API_KEY = f.read().strip()
-        
     print("Key loaded successfully.")
-    # print(GEMINI_API_KEY) # Uncomment to verify, but be careful printing keys!
-
 except FileNotFoundError:
     print(f"Error: The file was not found at {GEMINI_API_KEY}")
 except Exception as e:
-    print(f"An error occurred: {e}")
+    print(f"Key Error: {e}")
 
 TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 HISTORY_TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{HISTORY_TABLE_ID}"
@@ -57,7 +51,6 @@ DYNAMIC_FIELDS_BASE = [
     'bottle_name', 'distillery', 'alcohol_type', 'origin_country', 'region', 
     'casks_aged_in', 'nose', 'palette', 'orignal_volume', 'discount_amount'
 ]
-
 BOOLEAN_OPTIONS = [{'label': 'Yes', 'value': True}, {'label': 'No', 'value': False}]
 
 # --- Helper Functions ---
@@ -105,43 +98,19 @@ def fetch_bottle_list_optimized():
 def get_user_flavor_profile():
     if not client: return "No data."
     try:
-        # 1. Regions ordered by count descending (Top 5)
-        q_reg = f"""
-        SELECT region, COUNT(*) as cnt 
-        FROM `{TABLE_REF}` 
-        WHERE region IS NOT NULL 
-        GROUP BY 1 
-        ORDER BY 2 DESC 
-        LIMIT 5
-        """
+        q_reg = f"""SELECT region, COUNT(*) as cnt FROM `{TABLE_REF}` WHERE region IS NOT NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 5"""
         regions = [f"{r.region} ({r.cnt})" for r in client.query(q_reg).result()]
 
-        # 2. Casks ordered by count descending (Top 5)
-        q_cask = f"""
-        SELECT x, COUNT(*) as cnt 
-        FROM `{TABLE_REF}`, UNNEST(casks_aged_in) x 
-        GROUP BY 1 
-        ORDER BY 2 DESC 
-        LIMIT 5
-        """
+        q_cask = f"""SELECT x, COUNT(*) as cnt FROM `{TABLE_REF}`, UNNEST(casks_aged_in) x GROUP BY 1 ORDER BY 2 DESC LIMIT 5"""
         casks = [f"{r.x} ({r.cnt})" for r in client.query(q_cask).result()]
         
-        # 3. Palette ordered by count descending (Top 5)
-        q_palette = f"""
-        SELECT x, COUNT(*) as cnt 
-        FROM `{TABLE_REF}`, UNNEST(palette) x 
-        GROUP BY 1 
-        ORDER BY 2 DESC 
-        LIMIT 5
-        """
+        q_palette = f"""SELECT x, COUNT(*) as cnt FROM `{TABLE_REF}`, UNNEST(palette) x GROUP BY 1 ORDER BY 2 DESC LIMIT 5"""
         palettes = [f"{r.x} ({r.cnt})" for r in client.query(q_palette).result()]
         
-        # 4. Average Price
         q_price = f"SELECT AVG(price) as avg_p FROM `{TABLE_REF}` WHERE price > 0"
         price_res = list(client.query(q_price).result())
         price = price_res[0].avg_p if price_res and price_res[0].avg_p else 0
         
-        # Format the profile string for the AI
         profile_str = (
             f"Average Spend: ${int(price)}. "
             f"Top Regions: {', '.join(regions)}. "
@@ -149,10 +118,18 @@ def get_user_flavor_profile():
             f"Most Common Palette Notes: {', '.join(palettes)}."
         )
         return profile_str
-        
     except Exception as e:
         print(f"Profile Error: {e}")
         return "New collector."
+
+def get_bottles_names ():
+    if not client: return "DB Error"
+    try:
+        query = f"Select distinct bottle_name from `{TABLE_REF}`"
+        rows = list(client.query(query).result())
+        if not rows: return []
+        else: return rows
+    except Exception as e: return f"Error: {e}"
 
 # --- Pre-Load Data ---
 INITIAL_OPTIONS = fetch_all_dropdown_data()
@@ -171,15 +148,24 @@ def create_dynamic_input(id_base, label, is_repeated=False):
 # --- Layout ---
 app.layout = dbc.Container([
     dcc.Store(id='bottle-meta-store'),
+    dcc.Store(id='sort-state', data={'col': 'bottle_id', 'dir': 'DESC'}),
+    
+    dbc.Modal([
+        dbc.ModalHeader(dbc.ModalTitle("⚠️ Confirm Update")),
+        dbc.ModalBody(id='modal-body-content'),
+        dbc.ModalFooter([
+            dbc.Button("Cancel", id="close-modal-btn", className="ms-auto", n_clicks=0),
+            dbc.Button("Confirm Update", id="confirm-update-btn", color="danger", n_clicks=0)
+        ]),
+    ], id="confirmation-modal", is_open=False),
 
-    html.H1("🥃 Whisky Manager v4.3 AI", className="my-4 text-center"),
+    html.H1("🥃 Whisky Manager v6.0 - CLEAN REWRITE", className="my-4 text-center"),
     dbc.Alert(id='alert-output', is_open=False, duration=6000),
 
     dbc.Tabs([
         # === TAB 1: ADD NEW BOTTLE & AI ===
         dbc.Tab(label="➕ Add New Bottle", children=[
             dbc.Card(dbc.CardBody([
-                # AI Recommendation Section
                 dbc.Card([
                     dbc.CardHeader(html.H5("🤖 AI Sommelier", className="m-0")),
                     dbc.CardBody([
@@ -189,13 +175,21 @@ app.layout = dbc.Container([
                     ])
                 ], className="mb-4 border-info"),
 
-                # Manual Entry Form
                 html.H5("Manual Entry", className="mb-3"),
+                dbc.Row([
+                    dbc.Col([
+                        dbc.Input(id='ai-search-input', placeholder="Enter bottle name (e.g. Ardbeg Uigeadail)..."),
+                    ], width=9),
+                    dbc.Col([
+                        dbc.Button("🪄 Magic Fill", id='btn-magic-fill', color="magic", className="w-100"),
+                    ], width=3),
+                ], className="mb-4"),
                 dbc.Row([
                     create_dynamic_input('new-bottle_name', "Bottle Name"),
                     create_dynamic_input('new-distillery', "Distillery"),
                     create_dynamic_input('new-alcohol_type', "Alcohol Type"),
                 ]),
+
                 dbc.Row([
                     dbc.Col([dbc.Label("Age"), dbc.Input(id='new-age', type='number')], width=2),
                     dbc.Col([dbc.Label("ABV"), dbc.Input(id='new-abv', type='number', step=0.1)], width=2),
@@ -247,16 +241,18 @@ app.layout = dbc.Container([
             ]), className="mt-3")
         ]),
 
-        # === TAB 2: UPDATE ===
-        dbc.Tab(label="🔄 Update Stock Level", children=[
+        # === TAB 2: UPDATE (COMPLETELY REWRITTEN) ===
+        dbc.Tab(label="🔄 Update Stock & Flavor", children=[
             dbc.Card(dbc.CardBody([
                 dbc.Row([
-                    # Left Column: Selection & Randomizer
+                    # Left Column
                     dbc.Col([
                         html.H4("Select Bottle", className="mb-3"),
-                        dcc.Dropdown(id='update-selector', options=INITIAL_BOTTLE_LIST, placeholder="Search..."),
+                        dcc.Dropdown(id='update-selector', options=INITIAL_BOTTLE_LIST, placeholder="Search bottle..."),
                         
                         html.Hr(),
+                        
+                        # Random Dram Generator
                         dbc.Card([
                             dbc.CardHeader("🎲 Random Dram Generator"),
                             dbc.CardBody([
@@ -266,9 +262,34 @@ app.layout = dbc.Container([
                             ])
                         ], className="mb-3 border-dark"),
 
-                        html.Div(id='bottle-details-display', className="mb-3 text-center"),
+                        html.Div(id='bottle-info-badges', className="mb-3 text-center"),
+
+                        # Flavor Evolution Card
+                        dbc.Card([
+                            dbc.CardHeader([
+                                html.Span("🧬 Flavor Evolution", className="mr-2"),
+                                dbc.Button("✏️ Edit", id='btn-enable-edit', color="light", size="sm", style={'float': 'right'})
+                            ]),
+                            dbc.CardBody([
+                                dbc.Label("👃 Nose (Oxidation)"),
+                                dcc.Dropdown(id='upd-nose', multi=True, disabled=True, placeholder="Loading..."),
+                                dbc.Input(id='upd-nose-manual', placeholder="Add new (comma separated)...", className="mt-2", style={'display': 'none'}),
+                                
+                                html.Hr(className="my-3"),
+                                
+                                dbc.Label("👅 Palette (Oxidation)"),
+                                dcc.Dropdown(id='upd-palette', multi=True, disabled=True, placeholder="Loading..."),
+                                dbc.Input(id='upd-palette-manual', placeholder="Add new (comma separated)...", className="mt-2", style={'display': 'none'}),
+                                
+                                html.Hr(className="my-3"),
+                                
+                                dbc.Label("🧪 ABV % (Evaporation)"),
+                                dbc.Input(id='upd-abv', type='number', step=0.1, disabled=True),
+                                dbc.FormText("Cannot exceed original ABV.", color="muted")
+                            ])
+                        ], className="mb-3 border-secondary"),
                         
-                        # Calculator
+                        # Drink Calculator
                         dbc.Card([
                             dbc.CardBody([
                                 dbc.Row([
@@ -279,427 +300,921 @@ app.layout = dbc.Container([
                             ])
                         ], className="mb-3 bg-light"),
                         
-                        dbc.Button("Update Stock Level (Save)", id='submit-upd-btn', color="primary", className="w-100 mt-2"),
+                        dbc.Button("💾 Save Changes", id='btn-save-update', color="primary", className="w-100 mt-2", size="lg"),
                     ], width=5),
 
-                    # Right Column: Visualizer
+                    # Right Column: Bottle Visualizer
                     dbc.Col([
-                        html.H4("Adjust Level", className="text-center mb-4"),
+                        html.H4("Bottle Level", className="text-center mb-4"),
                         dbc.Row([
                             dbc.Col([
-                                dcc.Slider(id='stock-slider', min=0, max=100, step=0.1, value=100, vertical=True, verticalHeight=400,
-                                         marks={0: 'Empty', 25: '25%', 50: '50%', 75: '75%', 100: 'Full'})
+                                dcc.Slider(
+                                    id='stock-slider', 
+                                    min=0, max=100, step=0.1, value=100, 
+                                    vertical=True, verticalHeight=400,
+                                    marks={0: 'Empty', 25: '25%', 50: '50%', 75: '75%', 100: 'Full'}
+                                )
                             ], width=2, className="d-flex justify-content-center"),
                             dbc.Col([
-                                html.Div(style={'width': '120px', 'height': '400px', 'border': '4px solid #333', 'borderRadius': '10px 10px 5px 5px', 'position': 'relative', 'backgroundColor': '#f8f9fa', 'margin': '0 auto'}, 
-                                         children=[html.Div(id='liquid-fill', style={'width': '100%', 'backgroundColor': '#d35400', 'position': 'absolute', 'bottom': '0', 'transition': 'height 0.3s ease', 'height': '100%'})])
+                                html.Div(
+                                    style={
+                                        'width': '120px', 
+                                        'height': '400px', 
+                                        'border': '4px solid #333', 
+                                        'borderRadius': '10px 10px 5px 5px', 
+                                        'position': 'relative', 
+                                        'backgroundColor': '#f8f9fa', 
+                                        'margin': '0 auto'
+                                    }, 
+                                    children=[
+                                        html.Div(
+                                            id='liquid-fill', 
+                                            style={
+                                                'width': '100%', 
+                                                'backgroundColor': '#d35400', 
+                                                'position': 'absolute', 
+                                                'bottom': '0', 
+                                                'transition': 'height 0.3s ease', 
+                                                'height': '100%'
+                                            }
+                                        )
+                                    ]
+                                )
                             ], width=8)
                         ], justify="center"),
-                        html.H5(id='current-stock-display', className="mt-3 text-info text-center", children="Select a bottle"),
+                        html.H5(id='bottle-level-display', className="mt-3 text-info text-center", children="Select a bottle"),
                     ], width=7)
                 ])
             ]), className="mt-3")
         ]),
+        
+        # === TAB 3: SEARCH (unchanged) ===
+        dbc.Tab(label="🔍 Search Inventory", children=[
+            dbc.Card(dbc.CardBody([
+                html.H4("Advanced Whisky Search", className="mb-4 text-primary"),
+                
+                dbc.Row([
+                    dbc.Col([
+                        dbc.Label("🔎 Free Text Search"),
+                        dbc.Input(id='search-text', type='text', placeholder="Search by name, brand, or keywords...")
+                    ], width=12),
+                ], className="mb-3"),
+
+                dbc.Row([
+                    dbc.Col([
+                        dbc.Label("🛢️ Cask Type (Multi-Select)"),
+                        dcc.Dropdown(id='search-cask', multi=True, placeholder="Select casks...", 
+                                   options=INITIAL_OPTIONS.get('casks_aged_in', []))
+                    ], width=4),
+                    dbc.Col([
+                        dbc.Label("👃 Nose / Scents (Multi-Select)"),
+                        dcc.Dropdown(id='search-nose', multi=True, placeholder="Select scents...", 
+                                   options=INITIAL_OPTIONS.get('nose', []))
+                    ], width=4),
+                    dbc.Col([
+                        dbc.Label("👅 Palette / Flavors (Multi-Select)"),
+                        dcc.Dropdown(id='search-palette', multi=True, placeholder="Select flavors...", 
+                                   options=INITIAL_OPTIONS.get('palette', []))
+                    ], width=4),
+                ], className="mb-3"),
+
+                dbc.Row([
+                    dbc.Col([dbc.Label("🌍 Country"), dcc.Dropdown(id='search-country', options=INITIAL_OPTIONS.get('origin_country', []), placeholder="All")], width=2),
+                    dbc.Col([dbc.Label("🏭 Distillery"), dcc.Dropdown(id='search-distillery', options=INITIAL_OPTIONS.get('distillery', []), placeholder="All")], width=2),
+                    dbc.Col([dbc.Label("🥃 Type"), dcc.Dropdown(id='search-alcohol-type', options=INITIAL_OPTIONS.get('alcohol_type', []), placeholder="Type")], width=2),
+                    dbc.Col([dbc.Label("🧪 Min ABV"), dbc.Input(id='search-abv', type='number', step=0.1, placeholder="Any")], width=1),
+                    dbc.Col([dbc.Label("⏳ Min Age"), dbc.Input(id='search-age', type='number', placeholder="Any")], width=1),
+                    
+                    dbc.Col([
+                        dbc.Label("📊 Stock Level %"),
+                        dbc.InputGroup([
+                            dbc.Input(id='search-stock-val', type='number', min=0, max=100, placeholder="Val"),
+                            dbc.InputGroupText(
+                                dcc.RadioItems(
+                                    id='search-stock-mode',
+                                    options=[{'label': ' Min (≥)', 'value': 'min'}, {'label': ' Max (≤)', 'value': 'max'}],
+                                    value='min', inline=True, labelStyle={'marginRight': '5px', 'marginLeft': '5px'}
+                                )
+                            )
+                        ])
+                    ], width=4),
+                ], className="mb-4"),
+
+                dbc.Button("Run Search", id='btn-run-search', color="primary", size="lg", className="w-100 mb-4"),
+
+                html.Hr(),
+                
+                html.Div([
+                    html.H5("Search Results:", className="d-inline-block mr-3"),
+                    dbc.Badge("0 Records", id='search-count-badge', color="info", className="p-2", style={'fontSize': '1em'})
+                ], className="mb-3"),
+                
+                dcc.Loading(html.Div(id='search-results-area')),
+
+                html.Div([
+                    dbc.Button("Previous", id='btn-prev-page', color="secondary", outline=True, disabled=True, className="mr-2"),
+                    html.Span(id='page-display', children="Page 1", className="align-middle font-weight-bold mx-3"),
+                    dbc.Button("Next", id='btn-next-page', color="secondary", outline=True, disabled=True, className="ml-2"),
+                ], className="d-flex justify-content-center mt-4 mb-5"),
+
+                dcc.Store(id='page-store', data=0) 
+            ]))
+        ]),
     ])
 ], className="pb-5")
 
-# --- CALLBACKS ---
+# ============================================================================
+# CALLBACKS - UPDATE TAB (CLEAN REWRITE)
+# ============================================================================
 
-# 1. UI Toggles
-ALL_INPUT_IDS = [f'new-{f}' for f in DYNAMIC_FIELDS_BASE]
-for field in ALL_INPUT_IDS:
-    @app.callback(Output(f'{field}-input', 'style'), Input(f'{field}-dropdown', 'value'))
-    def toggle_input(val):
-        if (isinstance(val, list) and 'ADD_NEW_OPTION' in val) or val == 'ADD_NEW_OPTION': return {'display': 'block', 'marginTop': '5px'}
-        return {'display': 'none'}
 
-@app.callback(Output('discount-fields-wrapper', 'style'), Input('new-was-discounted', 'value'))
-def toggle_discount_section(v): return {'display': 'contents'} if v else {'display': 'none'}
 
-# 2. Price Logic
+# 1. FETCH BOTTLE DATA (Simple, Clean, Works)
 @app.callback(
-    [Output('new-discounted-price', 'value'), Output('new-price', 'value')],
-    [Input('new-price', 'value'), Input('new-discounted-price', 'value'), Input('new-discount_amount-dropdown', 'value'), Input('new-discount_amount-input', 'value')],
-    prevent_initial_call=True
+    [Output('bottle-meta-store', 'data'),
+     Output('upd-nose', 'options'),
+     Output('upd-nose', 'value'),
+     Output('upd-palette', 'options'),
+     Output('upd-palette', 'value'),
+     Output('upd-abv', 'value'),
+     Output('bottle-info-badges', 'children')],
+    Input('update-selector', 'value')
 )
-def calculate_prices(price_val, discounted_val, disc_drop, disc_input):
-    ctx_id = ctx.triggered[0]['prop_id'].split('.')[0]
-    disc_percent = float(disc_input) if (disc_drop == 'ADD_NEW_OPTION' and disc_input) else (float(disc_drop) if disc_drop and disc_drop != 'ADD_NEW_OPTION' else 0.0)
-    factor = (1 - (disc_percent / 100))
-    if factor == 0: return no_update, no_update
-
-    if ctx_id == 'new-price' or 'discount' in ctx_id:
-        if price_val: return round(float(price_val) * factor, 2), no_update
-    elif ctx_id == 'new-discounted-price':
-        if discounted_val: return no_update, round(float(discounted_val) / factor, 2)
-    return no_update, no_update
-
-# 3. Fetch Metadata
-@app.callback(Output('bottle-meta-store', 'data'), Input('update-selector', 'value'))
-def fetch_bottle_metadata(bottle_id):
-    if not bottle_id: return no_update
+def load_bottle_data(bottle_id):
+    if not bottle_id or not client:
+        return None, [], [], [], [], None, []
+    
     try:
-        # We join the Main Table with the Forecast View to get the date safely
-        query = f"""
-        SELECT 
-            t.stock_status_per, 
-            t.bottle_name, 
-            t.orignal_volume,
-            f.predicted_finish_date
-        FROM `{TABLE_REF}` t
-        LEFT JOIN `{FORECAST_TABLE_REF}` f ON t.bottle_id = f.bottle_id
-        WHERE t.bottle_id = {bottle_id}
+        # Get main table data
+        q_main = f"""
+        SELECT bottle_name, orignal_volume, alcohol_percentage, stock_status_per
+        FROM `{TABLE_REF}`
+        WHERE bottle_id = {bottle_id}
         """
-        res = list(client.query(query).result())[0]
+        main = list(client.query(q_main).result())[0]
         
-        # Format date to string if it exists
-        pred_date = res.predicted_finish_date.strftime('%Y-%m-%d') if res.predicted_finish_date else None
-
-        return {
-            'bid': bottle_id, 
-            'name': res.bottle_name, 
-            'vol': res.orignal_volume or 700, 
-            'stock': float(res.stock_status_per or 100),
-            'forecast_date': pred_date  # <--- Added Field
+        # Get LATEST history data (this is THE source of truth for flavor evolution)
+        q_history = f"""
+        SELECT nose, palette, alc_pre
+        FROM `{HISTORY_TABLE_REF}`
+        WHERE bottle_id = {bottle_id}
+        ORDER BY update_time DESC
+        LIMIT 1
+        """
+        history = list(client.query(q_history).result())
+        
+        # Decide which data to use
+        if history and history[0].nose is not None:
+            # USE HISTORY
+            nose_values = list(history[0].nose)
+            palette_values = list(history[0].palette) if history[0].palette else []
+            abv_value = float(history[0].alc_pre) if history[0].alc_pre else float(main.alcohol_percentage)
+        else:
+            # USE MAIN TABLE (first time)
+            q_initial = f"""
+            SELECT nose, palette
+            FROM `{TABLE_REF}`
+            WHERE bottle_id = {bottle_id}
+            """
+            initial = list(client.query(q_initial).result())[0]
+            nose_values = list(initial.nose) if initial.nose else []
+            palette_values = list(initial.palette) if initial.palette else []
+            abv_value = float(main.alcohol_percentage)
+        
+        # Build dropdown options (include current values + all known values)
+        all_opts = fetch_all_dropdown_data()
+        
+        nose_opts = all_opts.get('nose', [])
+        for nv in nose_values:
+            if not any(o['value'] == nv for o in nose_opts):
+                nose_opts.insert(0, {'label': nv, 'value': nv})
+        
+        palette_opts = all_opts.get('palette', [])
+        for pv in palette_values:
+            if not any(o['value'] == pv for o in palette_opts):
+                palette_opts.insert(0, {'label': pv, 'value': pv})
+        
+        # Store metadata
+        meta = {
+            'bid': bottle_id,
+            'name': main.bottle_name,
+            'vol': main.orignal_volume or 700,
+            'stock': float(main.stock_status_per),
+            'orig_abv': float(main.alcohol_percentage)
         }
-    except Exception as e: 
-        print(f"Metadata Fetch Error: {e}")
-        return no_update
+        
+        # Info badges
+        current_ml = int(meta['vol'] * (meta['stock'] / 100))
+        badges = [
+            dbc.Badge(f"Total: {meta['vol']}ml", color="dark", className="mr-2"),
+            dbc.Badge(f"Current: {current_ml}ml", color="info")
+        ]
+        
+        return meta, nose_opts, nose_values, palette_opts, palette_values, abv_value, badges
+        
+    except Exception as e:
+        print(f"Load Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, [], [], [], [], None, []
 
-# 4. RANDOM DRAM GENERATOR (UPDATED to Sync Dropdown)
+
+# 2. TOGGLE EDIT MODE
 @app.callback(
-    [Output('random-dram-output', 'children'), Output('update-selector', 'value')],
-    Input('btn-random-dram', 'n_clicks'), 
+    [Output('upd-nose', 'disabled'),
+     Output('upd-palette', 'disabled'),
+     Output('upd-abv', 'disabled'),
+     Output('upd-nose-manual', 'style'),
+     Output('upd-palette-manual', 'style'),
+     Output('btn-enable-edit', 'children'),
+     Output('btn-enable-edit', 'color')],
+    Input('btn-enable-edit', 'n_clicks'),
     prevent_initial_call=True
 )
-def generate_random_dram(n):
-    if not client: return "DB Error", no_update
+def toggle_edit(n):
+    if n and n % 2 != 0:  # Odd clicks = editing
+        return False, False, False, {'display': 'block'}, {'display': 'block'}, "🔓 Editing", "warning"
+    return True, True, True, {'display': 'none'}, {'display': 'none'}, "✏️ Edit", "light"
+
+
+# 3. VISUAL UPDATE (FIXED - Shows correct initial level)
+@app.callback(
+    [Output('liquid-fill', 'style'),
+     Output('stock-slider', 'value'),
+     Output('bottle-level-display', 'children')],
+    [Input('stock-slider', 'value'),
+     Input('bottle-meta-store', 'data'),
+     Input('btn-calculate-pour', 'n_clicks')],
+    [State('pour-size', 'value'),
+     State('glass-count', 'value')]
+)
+def update_visuals(slider_val, meta, n_pour, pour_ml, glasses):
+    if not meta:
+        style = {'height': '0%', 'width': '100%', 'backgroundColor': '#d35400', 
+                 'position': 'absolute', 'bottom': '0', 'transition': 'height 0.3s ease'}
+        return style, 100, "Select a bottle"
+    
+    triggered = ctx.triggered_id if ctx.triggered else None
+    
+    # CRITICAL FIX: When bottle data loads, use the ACTUAL stock level from DB
+    if triggered == 'bottle-meta-store':
+        current_pct = meta['stock']
+        display_text = f"{meta['name']}: {current_pct}%"
+    
+    # Pour calculation
+    elif triggered == 'btn-calculate-pour' and pour_ml and glasses:
+        current_ml = (slider_val / 100) * meta['vol']
+        consumed_ml = pour_ml * glasses
+        new_ml = max(current_ml - consumed_ml, 0)
+        current_pct = round((new_ml / meta['vol']) * 100, 2)
+        display_text = f"{meta['name']}: {current_pct}% (-{consumed_ml}ml)"
+    
+    # Manual slider adjustment
+    else:
+        current_pct = slider_val if slider_val is not None else meta['stock']
+        current_ml = int(meta['vol'] * (current_pct / 100))
+        display_text = f"{meta['name']}: {current_pct}% (~{current_ml}ml)"
+    
+    style = {
+        'width': '100%',
+        'backgroundColor': '#d35400',
+        'position': 'absolute',
+        'bottom': '0',
+        'transition': 'height 0.3s ease',
+        'height': f'{current_pct}%'
+    }
+    
+    return style, current_pct, display_text
+
+
+# 4. RANDOM DRAM GENERATOR
+@app.callback(
+    [Output('random-dram-output', 'children'),
+     Output('update-selector', 'value')],
+    Input('btn-random-dram', 'n_clicks'),
+    prevent_initial_call=True
+)
+def random_dram(n):
+    if not client:
+        return "DB Error", no_update
+    
     try:
         query = f"""
         WITH LastDrink AS (
             SELECT bottle_id, MAX(update_time) as last_sip 
-            FROM `{HISTORY_TABLE_REF}`  
+            FROM `{HISTORY_TABLE_REF}`
             GROUP BY bottle_id
         )
         SELECT t1.bottle_name, t1.bottle_id, t1.region, t1.distillery
         FROM `{TABLE_REF}` t1
         LEFT JOIN LastDrink t2 ON t1.bottle_id = t2.bottle_id
         WHERE t1.stock_status_per > 0
-        and t1.alcohol_type in ('Single Malt Whisky','Blended Scotch Whisky')
+        AND t1.alcohol_type IN ('Single Malt Whisky', 'Blended Scotch Whisky')
         AND (t2.last_sip IS NULL OR t2.last_sip < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY))
         """
         rows = list(client.query(query).result())
-        if not rows: return "No eligible bottles (all drunk recently or empty!)", no_update
+        
+        if not rows:
+            return "No eligible bottles!", no_update
         
         choice = random.choice(rows)
-        
-        # Display Element
         display = html.Div([
             html.H5(f"🥃 {choice.distillery} - {choice.bottle_name}", className="mb-0"),
-            html.Small(f"ID: {choice.bottle_id} | Region: {choice.region}")
+            html.Small(f"ID: {choice.bottle_id} | {choice.region}")
         ])
         
-        # Return Display AND the Bottle ID to update the dropdown
         return display, choice.bottle_id
         
-    except Exception as e: return f"Error: {e}", no_update
+    except Exception as e:
+        return f"Error: {e}", no_update
 
 
-def get_bottles_names ():
-    if not client: return "DB Error"
-    try:
-        query = f"""
-            Select distinct bottle_name
-            from `{TABLE_REF}`
-        """
-        rows = list(client.query(query).result())
-        
-        if not rows: 
-            return []
-        else:
-            return rows
-    except Exception as e: return f"Error: {e}"
+# 5. SAVE UPDATE (Modal Confirmation with Validation)
+@app.callback(
+    [Output('confirmation-modal', 'is_open'),
+     Output('modal-body-content', 'children')],
+    [Input('btn-save-update', 'n_clicks'),
+     Input('close-modal-btn', 'n_clicks'),
+     Input('confirm-update-btn', 'n_clicks')],
+    [State('confirmation-modal', 'is_open'),
+     State('bottle-meta-store', 'data'),
+     State('stock-slider', 'value'),
+     State('upd-nose', 'value'),
+     State('upd-palette', 'value'),
+     State('upd-abv', 'value'),
+     State('upd-nose-manual', 'value'),
+     State('upd-palette-manual', 'value')]
+)
+def handle_save_modal(n_save, n_close, n_confirm, is_open, meta, stock, nose, palette, abv, nose_man, pal_man):
+    if not ctx.triggered_id or not meta:
+        return False, ""
     
-# 5. AI RECOMMENDATION
-@app.callback(Output('ai-output-area', 'children'), Input('btn-ai-recommend', 'n_clicks'), prevent_initial_call=True)
-def generate_ai_rec(n):
-    if not ai_client: return dbc.Alert("GenAI Client not initialized.", color="danger")
+    if ctx.triggered_id == 'btn-save-update':
+        # Get ORIGINAL values from when bottle was loaded
+        try:
+            # Fetch current values from history to compare
+            q_current = f"""
+            SELECT nose, palette, alc_pre, stock_status_per
+            FROM (
+                SELECT nose, palette, alc_pre, NULL as stock_status_per
+                FROM `{HISTORY_TABLE_REF}`
+                WHERE bottle_id = {meta['bid']}
+                ORDER BY update_time DESC
+                LIMIT 1
+            )
+            UNION ALL
+            SELECT nose, palette, alcohol_percentage as alc_pre, stock_status_per
+            FROM `{TABLE_REF}`
+            WHERE bottle_id = {meta['bid']}
+            LIMIT 1
+            """
+            current_data = list(client.query(q_current).result())
+            
+            if current_data:
+                orig = current_data[0]
+                orig_nose = list(orig.nose) if orig.nose else []
+                orig_palette = list(orig.palette) if orig.palette else []
+                orig_abv = float(orig.alc_pre) if orig.alc_pre else meta['orig_abv']
+                orig_stock = float(meta['stock'])
+                
+                # Merge manual inputs
+                final_nose = list(nose) if nose else []
+                if nose_man:
+                    final_nose.extend([x.strip() for x in nose_man.split(',') if x.strip()])
+                
+                final_palette = list(palette) if palette else []
+                if pal_man:
+                    final_palette.extend([x.strip() for x in pal_man.split(',') if x.strip()])
+                
+                final_abv = float(abv) if abv else orig_abv
+                final_stock = float(stock) if stock is not None else orig_stock
+                
+                # CHECK IF ANYTHING CHANGED
+                nose_changed = set(final_nose) != set(orig_nose)
+                palette_changed = set(final_palette) != set(orig_palette)
+                abv_changed = abs(final_abv - orig_abv) > 0.01  # Allow small float differences
+                stock_changed = abs(final_stock - orig_stock) > 0.01
+                
+                if not (nose_changed or palette_changed or abv_changed or stock_changed):
+                    return True, html.Div([
+                        html.H4("⚠️ No Changes Detected", className="text-warning"),
+                        html.P("You must modify at least one field before saving:"),
+                        html.Ul([
+                            html.Li("Stock Level (%)"),
+                            html.Li("Nose notes"),
+                            html.Li("Palette notes"),
+                            html.Li("ABV (%)")
+                        ]),
+                        html.Hr(),
+                        html.Small("Please make changes or cancel.", className="text-muted")
+                    ])
+        
+        except Exception as e:
+            print(f"Validation error: {e}")
+            # If validation fails, continue anyway (failsafe)
+        
+        # Validate ABV
+        if abv and float(abv) > meta['orig_abv']:
+            return True, html.Div([
+                html.H4("❌ Invalid ABV", className="text-danger"),
+                html.P(f"New ABV ({abv}%) cannot exceed original ({meta['orig_abv']}%).")
+            ])
+        
+        # Merge manual inputs for display
+        final_nose = list(nose) if nose else []
+        if nose_man:
+            final_nose.extend([x.strip() for x in nose_man.split(',') if x.strip()])
+        
+        final_palette = list(palette) if palette else []
+        if pal_man:
+            final_palette.extend([x.strip() for x in pal_man.split(',') if x.strip()])
+        
+        # Show summary
+        summary = [
+            html.H4(meta['name'], className="text-primary"),
+            html.Hr(),
+            html.P([html.B("Stock: "), f"{meta['stock']}% → {stock}%"]),
+            html.P([html.B("ABV: "), f"{abv if abv else meta['orig_abv']}%"]),
+            html.P([html.B("Nose: "), ", ".join(final_nose) if final_nose else "No change"]),
+            html.P([html.B("Palette: "), ", ".join(final_palette) if final_palette else "No change"]),
+            html.Hr(),
+            html.Small("⚠️ This will save changes permanently.", className="text-muted")
+        ]
+        return True, html.Div(summary)
+    
+    return False, ""
+
+
+# 6. EXECUTE UPDATE (Clean Transaction)
+@app.callback(
+    [Output('alert-output', 'children'),
+     Output('alert-output', 'is_open'),
+     Output('alert-output', 'color'),
+     Output('update-selector', 'options'),
+     Output('update-selector', 'value', allow_duplicate=True),
+     Output('stock-slider', 'value', allow_duplicate=True),
+     Output('upd-nose-manual', 'value'),
+     Output('upd-palette-manual', 'value'),
+     Output('btn-enable-edit', 'n_clicks')],
+    Input('confirm-update-btn', 'n_clicks'),
+    [State('bottle-meta-store', 'data'),
+     State('stock-slider', 'value'),
+     State('upd-nose', 'value'),
+     State('upd-palette', 'value'),
+     State('upd-abv', 'value'),
+     State('upd-nose-manual', 'value'),
+     State('upd-palette-manual', 'value')],
+    prevent_initial_call=True
+)
+def execute_update(n, meta, stock, nose, palette, abv, nose_man, pal_man):
+    if not n or not meta or not client:
+        return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
+    
     try:
-        profile_text = get_user_flavor_profile()
-        bottles_list = get_bottles_names()
+        # Merge values
+        final_nose = list(nose) if nose else []
+        if nose_man:
+            final_nose.extend([x.strip() for x in nose_man.split(',') if x.strip()])
+        
+        final_palette = list(palette) if palette else []
+        if pal_man:
+            final_palette.extend([x.strip() for x in pal_man.split(',') if x.strip()])
+        
+        # Format for SQL
+        def sql_array(arr):
+            if not arr: return "[]"
+            safe = [f"'{str(x).replace(chr(39), chr(92)+chr(39))}'" for x in arr]
+            return f"[{', '.join(safe)}]"
+        
+        sql_nose = sql_array(final_nose)
+        sql_palette = sql_array(final_palette)
+        sql_abv = abv if abv else meta['orig_abv']
+        is_empty = (stock == 0)
+        safe_name = meta['name'].replace("'", "\\'")
+        bid = meta['bid']
+        
+        # Transaction
+        sql = f"""
+        BEGIN
+            -- Update main table
+            UPDATE `{TABLE_REF}`
+            SET stock_status_per = {stock},
+                full_or_empy = {str(is_empty).lower()},
+                updating_time = CURRENT_TIMESTAMP(),
+                nose = {sql_nose},
+                palette = {sql_palette},
+                alcohol_percentage = {sql_abv}
+            WHERE bottle_id = {bid};
+            
+            -- Insert history
+            INSERT INTO `{HISTORY_TABLE_REF}`
+            (update_id, bottle_id, bottle_name, stock_status_per, update_time, nose, palette, alc_pre)
+            VALUES (
+                (SELECT COALESCE(MAX(update_id), 0) + 1 FROM `{HISTORY_TABLE_REF}`),
+                {bid},
+                '{safe_name}',
+                {stock},
+                CURRENT_TIMESTAMP(),
+                {sql_nose},
+                {sql_palette},
+                {sql_abv}
+            );
+        END;
+        """
+        
+        client.query(sql).result()
+        
+        # Refresh bottle list
+        new_list = fetch_bottle_list_optimized()
+        
+        # Success - keep bottle selected, reset UI
+        return (
+            f"✅ Updated {meta['name']}!",
+            True,
+            "success",
+            new_list,
+            bid,  # Keep selected
+            100,  # Reset slider
+            "",   # Clear manual inputs
+            "",
+            0     # Reset edit button
+        )
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return f"❌ Update failed: {e}", True, "danger", no_update, no_update, no_update, no_update, no_update, no_update
+
+
+# ============================================================================
+# CALLBACKS - ADD TAB
+# ============================================================================
+
+# UI Toggles for Add Tab
+ALL_INPUT_IDS = [f'new-{f}' for f in DYNAMIC_FIELDS_BASE]
+for field in ALL_INPUT_IDS:
+    @app.callback(Output(f'{field}-input', 'style'), Input(f'{field}-dropdown', 'value'))
+    def toggle_input(val):
+        if (isinstance(val, list) and 'ADD_NEW_OPTION' in val) or val == 'ADD_NEW_OPTION':
+            return {'display': 'block', 'marginTop': '5px'}
+        return {'display': 'none'}
+
+@app.callback(Output('discount-fields-wrapper', 'style'), Input('new-was-discounted', 'value'))
+def toggle_discount(v):
+    return {'display': 'contents'} if v else {'display': 'none'}
+
+# Price Calculator
+@app.callback(
+    [Output('new-discounted-price', 'value'), Output('new-price', 'value')],
+    [Input('new-price', 'value'), Input('new-discounted-price', 'value'),
+     Input('new-discount_amount-dropdown', 'value'), Input('new-discount_amount-input', 'value')],
+    prevent_initial_call=True
+)
+def calc_prices(price, disc_price, disc_drop, disc_input):
+    ctx_id = ctx.triggered[0]['prop_id'].split('.')[0]
+    disc_pct = float(disc_input) if (disc_drop == 'ADD_NEW_OPTION' and disc_input) else (float(disc_drop) if disc_drop and disc_drop != 'ADD_NEW_OPTION' else 0.0)
+    factor = (1 - (disc_pct / 100))
+    
+    if factor == 0:
+        return no_update, no_update
+    
+    if ctx_id == 'new-price' or 'discount' in ctx_id:
+        if price:
+            return round(float(price) * factor, 2), no_update
+    elif ctx_id == 'new-discounted-price':
+        if disc_price:
+            return no_update, round(float(disc_price) / factor, 2)
+    
+    return no_update, no_update
+
+# AI Recommendation
+@app.callback(
+    Output('ai-output-area', 'children'),
+    Input('btn-ai-recommend', 'n_clicks'),
+    prevent_initial_call=True
+)
+def ai_recommend(n):
+    if not ai_client:
+        return dbc.Alert("AI not available", color="danger")
+    
+    try:
+        profile = get_user_flavor_profile()
+        bottles = get_bottles_names()
+        
         prompt = f"""
         Act as a master Whisky Sommelier.
-        My Collection Stats: {profile_text}
-        Based on this, scour your knowledge base and recommend 3 specific whisky bottles I should buy next that fit my flavor profile and average monthly budget spent of whisky, but offer something slightly interesting/new that I DONT HAVE ALREADY IN MY INVENTORY. AND PLEASE DON'T GIVE ME PEATED WHISKIES AT ALL!
-        Format as a Markdown list and add abv and pallate and nose attribute per each bottle. Include estimated price and why it fits. Return the results in Shekels and search the whiskies in local israeli alcohol stores.
-        Make sure the bottles you return don't already exist in my whisky collection : {bottles_list}
+        My Collection Stats: {profile}
+        
+        Recommend 3 specific whisky bottles I should buy next that:
+        - Fit my flavor profile and budget
+        - Offer something new/different
+        - Are NOT already in my inventory: {bottles}
+        - NO PEATED WHISKIES
+        
+        Format as Markdown with ABV, palette, nose, and estimated price in Shekels (Israeli stores).
         """
+        
         response = ai_client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
         return dcc.Markdown(response.text)
+        
     except Exception as e:
         return dbc.Alert(f"AI Error: {e}", color="danger")
 
-# 6. Master Visual Update
+# Insert Bottle
 @app.callback(
-    [Output('liquid-fill', 'style'), Output('stock-slider', 'value'), Output('current-stock-display', 'children'), Output('bottle-details-display', 'children')],
-    [Input('stock-slider', 'value'), Input('bottle-meta-store', 'data'), Input('btn-calculate-pour', 'n_clicks')],
-    [State('pour-size', 'value'), State('glass-count', 'value')]
-)
-def master_visual_update(slider_val, store_data, n_clicks, pour_size, glass_count):
-    ctx_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
-    current_val = slider_val if slider_val is not None else 100
-    name_display = "Select a bottle"
-    details_html = []
-
-    # Helper to create badges
-    def create_badges(total_vol, current_vol, f_date):
-        badges = [
-            dbc.Badge(f"Total: {total_vol}ml", color="dark", className="mr-2"),
-            dbc.Badge(f"Current: {int(current_vol)}ml", color="info", className="mr-2")
-        ]
-        if f_date:
-            badges.append(dbc.Badge(f"Est. Finish: {f_date}", color="danger"))
-        return badges
-
-    if ctx_id == 'bottle-meta-store' and store_data:
-        current_val = store_data['stock']
-        name_display = f"{store_data['name']}: {current_val}%"
-        current_ml = store_data['vol']*(current_val/100)
-        details_html = create_badges(store_data['vol'], current_ml, store_data.get('forecast_date'))
-    
-    elif ctx_id == 'btn-calculate-pour' and store_data:
-        current_ml = (slider_val / 100) * store_data['vol']
-        remove_ml = (pour_size * glass_count)
-        new_ml = max(current_ml - remove_ml, 0)
-        current_val = round((new_ml / store_data['vol']) * 100, 2)
-        name_display = f"New Level: {current_val}% (-{remove_ml}ml)"
-        # Note: Date won't update instantly here until saved, so we keep the old date or show generic
-        details_html = [dbc.Badge(f"Total: {store_data['vol']}ml", color="dark", className="mr-2"), 
-                        dbc.Badge(f"Remaining: {int(new_ml)}ml", color="warning")]
-
-    elif store_data:
-        current_ml = int(store_data['vol'] * (current_val/100))
-        name_display = f"Manual: {current_val}% (~{current_ml}ml)"
-        details_html = create_badges(store_data['vol'], current_ml, store_data.get('forecast_date'))
-
-    style = {'width': '100%', 'backgroundColor': '#d35400', 'position': 'absolute', 'bottom': '0', 'transition': 'height 0.3s ease', 'height': f'{current_val}%'}
-    return style, current_val, name_display, details_html
-
-# 7. INSERT BOTTLE (FIXED: With SQL Escaping)
-@app.callback(
-    [Output('alert-output', 'children'), Output('alert-output', 'is_open'), Output('alert-output', 'color'), 
-     Output('update-selector', 'options'),
+    [Output('alert-output', 'children', allow_duplicate=True),
+     Output('alert-output', 'is_open', allow_duplicate=True),
+     Output('alert-output', 'color', allow_duplicate=True),
+     Output('update-selector', 'options', allow_duplicate=True),
      *[Output(f'new-{f}-dropdown', 'value') for f in DYNAMIC_FIELDS_BASE],
      *[Output(f'new-{f}-input', 'value') for f in DYNAMIC_FIELDS_BASE],
-     Output('new-age', 'value'), Output('new-abv', 'value'), 
-     Output('new-price', 'value', allow_duplicate=True), Output('new-discounted-price', 'value', allow_duplicate=True),
-     Output('new-purchase_date', 'date'), Output('new-opening_date', 'date'), Output('new-stock-percent', 'value'), Output('new-bottle-count', 'value'),
-     *[Output(f'new-{f}-dropdown', 'options') for f in DYNAMIC_FIELDS_BASE]
-    ],
+     Output('new-age', 'value'),
+     Output('new-abv', 'value'),
+     Output('new-price', 'value', allow_duplicate=True),
+     Output('new-discounted-price', 'value', allow_duplicate=True),
+     Output('new-purchase_date', 'date'),
+     Output('new-opening_date', 'date'),
+     Output('new-stock-percent', 'value'),
+     Output('new-bottle-count', 'value'),
+     *[Output(f'new-{f}-dropdown', 'options') for f in DYNAMIC_FIELDS_BASE]],
     Input('submit-new-btn', 'n_clicks'),
-    [State(f'new-{f}-dropdown', 'value') for f in DYNAMIC_FIELDS_BASE] + 
+    [State(f'new-{f}-dropdown', 'value') for f in DYNAMIC_FIELDS_BASE] +
     [State(f'new-{f}-input', 'value') for f in DYNAMIC_FIELDS_BASE] +
-    [State('new-age', 'value'), State('new-abv', 'value'), 
+    [State('new-age', 'value'), State('new-abv', 'value'),
      State('new-price', 'value'), State('new-discounted-price', 'value'),
-     State('new-limited', 'value'), State('new-special', 'value'), State('new-was-gift', 'value'), State('new-was-discounted', 'value'),
-     State('new-purchase_date', 'date'), State('new-opening_date', 'date'), State('new-stock-percent', 'value'), State('new-bottle-count', 'value')],
+     State('new-limited', 'value'), State('new-special', 'value'),
+     State('new-was-gift', 'value'), State('new-was-discounted', 'value'),
+     State('new-purchase_date', 'date'), State('new-opening_date', 'date'),
+     State('new-stock-percent', 'value'), State('new-bottle-count', 'value')],
     prevent_initial_call=True
 )
-def insert_bottle_loop(n_clicks, *args):
+def insert_bottles(n, *args):
+    if not n or not client:
+        return no_update
+    
     num_dyn = len(DYNAMIC_FIELDS_BASE)
     dropdowns = args[:num_dyn]
-    inputs = args[num_dyn : num_dyn*2]
-    age, abv, price, discounted_price, limited, special, was_gift, was_discounted, purch_date, open_date, stock_pct, count_qty = args[num_dyn*2:]
-
-    def resolve(drop, inp, is_rep=False):
-        if is_rep:
+    inputs = args[num_dyn:num_dyn*2]
+    age, abv, price, disc_price, limited, special, gift, discounted, purch, opening, stock, qty = args[num_dyn*2:]
+    
+    def resolve(drop, inp, multi=False):
+        if multi:
             if not drop: return []
             base = [v for v in drop if v != 'ADD_NEW_OPTION'] if 'ADD_NEW_OPTION' in drop else drop
-            if inp: base.extend([x.strip() for x in inp.split(',') if x.strip()])
-            # Escape single quotes in lists
+            if inp:
+                base.extend([x.strip() for x in inp.split(',') if x.strip()])
             return [str(x).replace("'", "\\'") for x in base]
-        
         val = inp if drop == 'ADD_NEW_OPTION' else drop
-        # Escape single quotes in strings
         if isinstance(val, str):
             return val.replace("'", "\\'")
         return val
-
-    b_name = resolve(dropdowns[0], inputs[0])
-    if not b_name: return "❌ Name required.", True, "danger", no_update, *[no_update]*(42-4)
-
-    try:
-        row_id_res = list(client.query(f"SELECT COALESCE(MAX(bottle_id), 0) as m FROM `{TABLE_REF}`").result())
-        row_id = row_id_res[0].m
-        qty = int(count_qty or 1)
-        
-        for i in range(1, qty + 1):
-            new_id = row_id + i
-            full_empty = False if (stock_pct and stock_pct > 0) else True
-            final_price = float(price) if price else 'NULL'
-            
-            # 1. Main Table Insert
-            # Note: b_name and other strings are now escaped by the resolve function above
-            q_ins = f"""INSERT INTO `{TABLE_REF}` (bottle_id, bottle_name, distillery, alcohol_type, origin_country, region, casks_aged_in, nose, palette, age, alcohol_percentage, price, limited_edition, special_bottling, was_a_gift, stock_status_per, full_or_empy, orignal_volume, date_of_purchase, opening_date, bottle_counter, was_discounted, discount_amount, discounted_price, time_of_registration) VALUES ({new_id}, '{b_name}', '{resolve(dropdowns[1], inputs[1]) or ''}', '{resolve(dropdowns[2], inputs[2]) or ''}', '{resolve(dropdowns[3], inputs[3]) or ''}', '{resolve(dropdowns[4], inputs[4]) or ''}', {list(resolve(dropdowns[5], inputs[5], True))}, {list(resolve(dropdowns[6], inputs[6], True))}, {list(resolve(dropdowns[7], inputs[7], True))}, {age or 'NULL'}, {abv or 'NULL'}, {final_price}, {str(limited).lower()}, {str(special).lower()}, {str(was_gift).lower()}, {stock_pct}, {str(full_empty).lower()}, {resolve(dropdowns[8], inputs[8]) or 700}, '{purch_date}', {f"'{open_date}'" if open_date else 'NULL'}, 1, {str(was_discounted).lower()}, {resolve(dropdowns[9], inputs[9]) or 'NULL'}, {discounted_price or 'NULL'}, CURRENT_TIMESTAMP())"""
-            client.query(q_ins).result()
-
-            # 2. History Table Insert
-            q_hist_init = f"""
-                INSERT INTO `{HISTORY_TABLE_REF}` 
-                (update_id, bottle_id, bottle_name, stock_status_per, update_time)
-                VALUES (
-                    (SELECT COALESCE(MAX(update_id), 0) + 1 FROM `{HISTORY_TABLE_REF}`),
-                    {new_id},
-                    '{b_name}',
-                    {stock_pct},
-                    CURRENT_TIMESTAMP()
-                )
-            """
-            client.query(q_hist_init).result()
-
-        fresh_list = fetch_bottle_list_optimized()
-        fresh_opts = fetch_all_dropdown_data()
-        new_opts_list = [fresh_opts.get(f, []) for f in DYNAMIC_FIELDS_BASE]
-        
-        reset_list = [None] * (num_dyn * 2) + [None, None, None, None, None, None, 100, 1]
-        return f"✅ Added {qty} bottles.", True, "success", fresh_list, *reset_list, *new_opts_list
-
-    except Exception as e:
-        return f"Insert Error: {e}", True, "danger", no_update, *[no_update]*(42-4)
-
-# 8. UPDATE STOCK SUBMIT (UPGRADED: With Forecast & Depletion Logic)
-@app.callback(
-    [Output('alert-output', 'children', allow_duplicate=True), 
-     Output('alert-output', 'is_open', allow_duplicate=True), 
-     Output('alert-output', 'color', allow_duplicate=True),
-     Output('update-selector', 'options', allow_duplicate=True),
-     Output('bottle-meta-store', 'data', allow_duplicate=True)
-    ],
-    Input('submit-upd-btn', 'n_clicks'),
-    [State('update-selector', 'value'), State('stock-slider', 'value')],
-    prevent_initial_call=True
-)
-def update_stock_submit(n_clicks, bid, stock_val):
-    if not bid: return "Select bottle first", True, "warning", no_update, no_update
+    
+    name = resolve(dropdowns[0], inputs[0])
+    if not name:
+        return "❌ Bottle name required", True, "danger", no_update, *[no_update]*42
     
     try:
-        # 1. Fetch Current Data AND Forecast Data together
-        # We need the forecast dates BEFORE we insert into history to calculate flags
-        q_get_data = f"""
-        SELECT 
-            t.stock_status_per, 
-            t.opening_date, 
-            t.bottle_name, 
-            t.orignal_volume,
-            f.est_consumption_date, 
-            f.predicted_finish_date
-        FROM `{TABLE_REF}` t
-        LEFT JOIN `{FORECAST_TABLE_REF}` f ON t.bottle_id = f.bottle_id
-        WHERE t.bottle_id = {bid}
-        """
+        qty = int(qty or 1)
         
-        rows = list(client.query(q_get_data).result())
-        if not rows:
-            return "Error: Bottle not found in DB", True, "danger", no_update, no_update
+        # Build SQL
+        sql = "BEGIN\nDECLARE start_id INT64;\n"
+        sql += f"SET start_id = (SELECT COALESCE(MAX(bottle_id), 0) FROM `{TABLE_REF}`);\n"
+        
+        for i in range(1, qty + 1):
+            curr_id = f"start_id + {i}"
             
-        curr_row = rows[0]
-        
-        # --- LOGIC: Calculate Flags ---
-        today = datetime.now().date()
-        
-        # A. Consumption Flag Logic
-        # Default to NULL (as string for SQL)
-        cons_flag_sql = "NULL" 
-        
-        if curr_row.est_consumption_date:
-            est_date = curr_row.est_consumption_date
-            if today < est_date:
-                cons_flag_sql = "'Earlier Then Forecast'"
-            elif today == est_date:
-                cons_flag_sql = "'Right on Schedule'"
-            else:
-                # user requested: 'Later Then Scheduele '
-                cons_flag_sql = "'Later Then Scheduele '"
-
-        # B. Depletion Flag Logic
-        # Only relevant if stock becomes 0
-        depletion_flag_sql = "NULL"
-        
-        if float(stock_val) == 0 and curr_row.predicted_finish_date:
-            fin_date = curr_row.predicted_finish_date
-            if today < fin_date:
-                depletion_flag_sql = "'Earlier Then Forecast'"
-            elif today == fin_date:
-                 # user requested: 'Right on  Sceduele '
-                depletion_flag_sql = "'Right on  Sceduele '"
-            else:
-                depletion_flag_sql = "'Later Then Forecast'"
-
-        # --- DATABASE UPDATES ---
-
-        # 2. Update Main Table (Inventory)
-        is_empty = (stock_val == 0)
-        
-        # Escape the name for the history query
-        safe_bottle_name = curr_row.bottle_name.replace("'", "\\'") if curr_row.bottle_name else ""
-
-        update_clauses = [
-            f"stock_status_per = {stock_val}", 
-            f"full_or_empy = {str(is_empty).lower()}", 
-            "updating_time = CURRENT_TIMESTAMP()"
-        ]
-        status_extra = ""
-        
-        # Auto-open logic if not already opened
-        if stock_val < (curr_row.stock_status_per or 100):
-            if (curr_row.stock_status_per == 100 or curr_row.opening_date is None):
-                update_clauses.append(f"opening_date = '{today}'")
-                status_extra = " (Auto-Opened)"
-        
-        q_upd = f"UPDATE `{TABLE_REF}` SET {', '.join(update_clauses)} WHERE bottle_id = {bid}"
-        client.query(q_upd).result()
-
-        # 3. Insert into History (With New Flags)
-        q_hist = f"""
-            INSERT INTO `{HISTORY_TABLE_REF}` 
-            (update_id, bottle_id, bottle_name, stock_status_per, update_time, consumption_flag, depletion_flag) 
+            val_name = f"'{name}'"
+            val_dist = f"'{resolve(dropdowns[1], inputs[1]) or ''}'"
+            val_type = f"'{resolve(dropdowns[2], inputs[2]) or ''}'"
+            val_country = f"'{resolve(dropdowns[3], inputs[3]) or ''}'"
+            val_region = f"'{resolve(dropdowns[4], inputs[4]) or ''}'"
+            val_casks = list(resolve(dropdowns[5], inputs[5], True))
+            val_nose = list(resolve(dropdowns[6], inputs[6], True))
+            val_pal = list(resolve(dropdowns[7], inputs[7], True))
+            val_vol = resolve(dropdowns[8], inputs[8]) or 700
+            
+            sql += f"""
+            INSERT INTO `{TABLE_REF}`
+            (bottle_id, bottle_name, distillery, alcohol_type, origin_country, region,
+             casks_aged_in, nose, palette, age, alcohol_percentage, price,
+             limited_edition, special_bottling, was_a_gift, stock_status_per, full_or_empy,
+             orignal_volume, date_of_purchase, opening_date, bottle_counter,
+             was_discounted, discount_amount, discounted_price, time_of_registration)
             VALUES (
-                (SELECT COALESCE(MAX(update_id),0)+1 FROM `{HISTORY_TABLE_REF}`), 
-                {bid}, 
-                '{safe_bottle_name}', 
-                {stock_val}, 
-                CURRENT_TIMESTAMP(),
-                {cons_flag_sql},
-                {depletion_flag_sql}
-            )
-        """
-        client.query(q_hist).result()
-
-        # 4. Prepare UI Updates
-        # We already have the forecast date from the initial fetch (curr_row.predicted_finish_date)
-        # However, if the logic relies on a live recalc of the forecast *after* the update, 
-        # we might need to re-fetch. Usually, forecast views update after some time or scheduled query.
-        # For now, we use the date we just fetched to update the UI badge.
+                {curr_id}, {val_name}, {val_dist}, {val_type}, {val_country}, {val_region},
+                {val_casks}, {val_nose}, {val_pal}, {age or 'NULL'}, {abv or 'NULL'}, {price or 'NULL'},
+                {str(limited).lower()}, {str(special).lower()}, {str(gift).lower()},
+                {stock}, {str(stock==0).lower()}, {val_vol}, '{purch}',
+                {f"'{opening}'" if opening else 'NULL'}, 1,
+                {str(discounted).lower()}, {resolve(dropdowns[9], inputs[9]) or 'NULL'},
+                {disc_price or 'NULL'}, CURRENT_TIMESTAMP()
+            );
+            
+            INSERT INTO `{HISTORY_TABLE_REF}`
+            (update_id, bottle_id, bottle_name, stock_status_per, update_time)
+            VALUES (
+                (SELECT COALESCE(MAX(update_id), 0) + 1 FROM `{HISTORY_TABLE_REF}`),
+                {curr_id}, {val_name}, {stock}, CURRENT_TIMESTAMP()
+            );
+            """
         
-        new_date_str = None
-        if curr_row.predicted_finish_date:
-            new_date_str = curr_row.predicted_finish_date.strftime('%Y-%m-%d')
-
+        sql += "END;"
+        
+        client.query(sql).result()
+        
+        # Refresh
         new_list = fetch_bottle_list_optimized()
+        new_opts = fetch_all_dropdown_data()
+        opts_list = [new_opts.get(f, []) for f in DYNAMIC_FIELDS_BASE]
         
-        new_store_data = {
-            'bid': bid, 
-            'name': curr_row.bottle_name, 
-            'vol': curr_row.orignal_volume or 700, 
-            'stock': float(stock_val),
-            'forecast_date': new_date_str 
-        }
-
-        return f"✅ Updated to {stock_val}%{status_extra}", True, "success", new_list, new_store_data
-
+        reset = [None]*(num_dyn*2) + [None, None, None, None, None, None, 100, 1]
+        
+        return f"✅ Added {qty} bottle(s)", True, "success", new_list, *reset, *opts_list
+        
     except Exception as e:
-        print(f"Update Error: {e}") # Print to console for debugging
-        return f"Error: {e}", True, "danger", no_update, no_update
+        import traceback
+        traceback.print_exc()
+        return f"❌ Insert failed: {e}", True, "danger", no_update, *[no_update]*42
+
+
+# ============================================================================
+# CALLBACKS - SEARCH TAB
+# ============================================================================
+
+@app.callback(
+    [Output('search-results-area', 'children'),
+     Output('search-count-badge', 'children'),
+     Output('page-store', 'data'),
+     Output('page-display', 'children'),
+     Output('btn-prev-page', 'disabled'),
+     Output('btn-next-page', 'disabled')],
+    [Input('btn-run-search', 'n_clicks'),
+     Input('sort-state', 'data'),
+     Input('btn-prev-page', 'n_clicks'),
+     Input('btn-next-page', 'n_clicks')],
+    [State('search-text', 'value'),
+     State('search-cask', 'value'),
+     State('search-nose', 'value'),
+     State('search-palette', 'value'),
+     State('search-country', 'value'),
+     State('search-distillery', 'value'),
+     State('search-alcohol-type', 'value'),
+     State('search-abv', 'value'),
+     State('search-age', 'value'),
+     State('search-stock-val', 'value'),
+     State('search-stock-mode', 'value'),
+     State('page-store', 'data')],
+    prevent_initial_call=True
+)
+def search_bottles(n, sort_data, n_prev, n_next, txt, casks, noses, palettes, country, dist, alc_type, abv, age, stock_val, stock_mode, page):
+    if not client:
+        return dbc.Alert("DB Error", color="danger"), "Error", 0, "", True, True
+    
+    triggered = ctx.triggered_id
+    page_size = 50
+    
+    if triggered == 'btn-run-search' or triggered == 'sort-state':
+        page = 0
+    elif triggered == 'btn-next-page':
+        page += 1
+    elif triggered == 'btn-prev-page':
+        page = max(0, page - 1)
+    
+    offset = page * page_size
+    
+    def progress_bar(val):
+        colors = {
+            100: "#006400", 95: "#90EE90", 85: "#FFD700", 70: "#FFB347",
+            50: "#FF8C00", 35: "#FA8072", 20: "#B22222", 10: "#8B0000"
+        }
+        bg = "#808080"
+        for threshold, color in sorted(colors.items(), reverse=True):
+            if val >= threshold:
+                bg = color
+                break
+        
+        text_color = "black" if (val < 25 or (35 <= val < 85) or (85 <= val < 100)) else "white"
+        
+        return html.Div(
+            style={'position': 'relative', 'width': '100%', 'height': '22px',
+                   'backgroundColor': 'white', 'border': '1px solid #ccc', 'borderRadius': '4px'},
+            children=[
+                html.Div(style={'width': f'{val}%', 'height': '100%', 'backgroundColor': bg,
+                               'position': 'absolute', 'transition': 'width 0.5s'}),
+                html.Div(f"{int(val)}%", style={'position': 'absolute', 'width': '100%',
+                                                'textAlign': 'center', 'color': text_color,
+                                                'fontWeight': 'bold', 'lineHeight': '20px'})
+            ]
+        )
+    
+    query = f"""
+    SELECT bottle_id, bottle_name, distillery, region, alcohol_percentage, age, price, stock_status_per, alcohol_type,
+           COUNT(*) OVER() as total_rows
+    FROM `{TABLE_REF}`
+    WHERE 1=1
+    """
+    
+    if txt:
+        safe = txt.replace("'", "\\'")
+        query += f" AND (LOWER(bottle_name) LIKE '%{safe.lower()}%' OR LOWER(distillery) LIKE '%{safe.lower()}%')"
+    if country: query += f" AND origin_country = '{country}'"
+    if dist: query += f" AND distillery = '{dist}'"
+    if alc_type: query += f" AND alcohol_type = '{alc_type}'"
+    if abv: query += f" AND alcohol_percentage >= {abv}"
+    if age: query += f" AND age >= {age}"
+    if stock_val is not None:
+        op = "<=" if stock_mode == 'max' else ">="
+        query += f" AND stock_status_per {op} {stock_val}"
+    
+    if casks:
+        casks_str = ", ".join([f"'{c}'" for c in casks])
+        query += f" AND EXISTS(SELECT 1 FROM UNNEST(casks_aged_in) c WHERE c IN ({casks_str}))"
+    if noses:
+        noses_str = ", ".join([f"'{n}'" for n in noses])
+        query += f" AND EXISTS(SELECT 1 FROM UNNEST(nose) n WHERE n IN ({noses_str}))"
+    if palettes:
+        pal_str = ", ".join([f"'{p}'" for p in palettes])
+        query += f" AND EXISTS(SELECT 1 FROM UNNEST(palette) p WHERE p IN ({pal_str}))"
+    
+    sort_col = sort_data.get('col', 'bottle_id')
+    sort_dir = sort_data.get('dir', 'DESC')
+    allowed = ['bottle_id', 'bottle_name', 'alcohol_type', 'distillery', 'region',
+               'alcohol_percentage', 'age', 'price', 'stock_status_per']
+    if sort_col not in allowed:
+        sort_col = 'bottle_id'
+    
+    query += f" ORDER BY {sort_col} {sort_dir} LIMIT {page_size} OFFSET {offset}"
+    
+    try:
+        rows = list(client.query(query).result())
+        
+        if not rows:
+            return dbc.Alert("No results", color="warning"), "0", 0, "Page 1", True, True
+        
+        total = rows[0].total_rows
+        total_pages = (total + page_size - 1) // page_size
+        
+        cols = [
+            ("ID", "bottle_id"), ("Name", "bottle_name"), ("Type", "alcohol_type"),
+            ("Distillery", "distillery"), ("Region", "region"), ("ABV", "alcohol_percentage"),
+            ("Age", "age"), ("Price", "price"), ("Stock", "stock_status_per")
+        ]
+        
+        headers = []
+        for label, field in cols:
+            icon = ""
+            if field == sort_col:
+                icon = " ⬇️" if sort_dir == 'DESC' else " ⬆️"
+            headers.append(
+                html.Th(f"{label}{icon}", id={'type': 'sort-head', 'index': field},
+                       style={'cursor': 'pointer', 'userSelect': 'none'})
+            )
+        
+        body = []
+        for r in rows:
+            body.append(html.Tr([
+                html.Td(r.bottle_id),
+                html.Td(r.bottle_name, style={'fontWeight': 'bold'}),
+                html.Td(r.alcohol_type),
+                html.Td(r.distillery),
+                html.Td(r.region),
+                html.Td(f"{r.alcohol_percentage}%"),
+                html.Td(r.age if r.age else "-"),
+                html.Td(f"{int(r.price)}₪" if r.price else "-"),
+                html.Td(progress_bar(r.stock_status_per), style={'width': '140px'})
+            ]))
+        
+        table = dbc.Table([html.Thead(html.Tr(headers)), html.Tbody(body)],
+                         bordered=True, hover=True, striped=True, responsive=True)
+        
+        return (table, f"{total} Records", page, f"Page {page+1} of {total_pages}",
+                page == 0, (page + 1) >= total_pages)
+        
+    except Exception as e:
+        return dbc.Alert(f"Error: {e}", color="danger"), "Error", 0, "", True, True
+
+
+@app.callback(
+    Output('sort-state', 'data'),
+    Input({'type': 'sort-head', 'index': ALL}, 'n_clicks'),
+    State('sort-state', 'data'),
+    prevent_initial_call=True
+)
+def update_sort(n_clicks, current):
+    if not any(n_clicks):
+        return no_update
+    
+    triggered = ctx.triggered_id
+    if not triggered:
+        return no_update
+    
+    col = triggered['index']
+    new_dir = 'ASC'
+    if current['col'] == col:
+        new_dir = 'DESC' if current['dir'] == 'ASC' else 'ASC'
+    
+    return {'col': col, 'dir': new_dir}
+
 
 if __name__ == '__main__':
     app.run(debug=True, port=8055)
