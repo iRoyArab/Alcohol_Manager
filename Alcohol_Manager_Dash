@@ -7,6 +7,7 @@ from google import genai
 from datetime import datetime, timedelta
 import os
 import random
+import json
 
 # --- Configuration ---
 SERVICE_ACCOUNT_FILE = r"C:\Users\iroyp\OneDrive\שולחן העבודה\TELEGRAM\Telegram-Autoforwarder-master\hopeful-flash-478009-b7-1acfbd3ccca6.json"
@@ -16,6 +17,37 @@ TABLE_ID = "my_whisky_collection"
 HISTORY_TABLE_ID = "alcohol_update"
 Forecast_id = "consumption_forecast"
 GEMINI_API_KEY = r"C:\Users\iroyp\OneDrive\שולחן העבודה\TELEGRAM\Telegram-Autoforwarder-master\gemini_key_api.txt"
+
+
+
+
+
+# נגדיר את הסטייל כמשתנה כדי שהקוד למטה יישאר נקי
+magic_btn_style = {
+    'background': 'linear-gradient(135deg, #1A2980 0%, #26D0CE 100%)', 
+    'border': 'none',
+    'color': 'white',
+    'fontSize': '18px', 
+    'fontWeight': '600',
+    'letterSpacing': '0.5px',
+    'borderRadius': '8px',
+    'boxShadow': '0 4px 12px rgba(0, 100, 255, 0.3)',
+    'padding': '6px 12px',
+    'width': '100%'
+}
+
+alc_scan_style = {
+    'background': 'linear-gradient(135deg, #134E5E 0%, #71B280 100%)',
+    'border': 'none',
+    'color': 'white',
+    'fontSize': '18px', 
+    'fontWeight': '600',
+    'letterSpacing': '0.5px',
+    'borderRadius': '8px',
+    'boxShadow': '0 4px 12px rgba(0, 100, 255, 0.3)',
+    'padding': '6px 12px',
+    'width': '100%'
+}
 
 # Open and read API Key
 try:
@@ -43,8 +75,24 @@ try:
 except Exception as e:
     print(f"GenAI Init Error: {e}")
     ai_client = None
+    
+model='gemini-2.0-flash'
 
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], title="Alcohol Manager")
+
+
+import uuid
+import qrcode
+import io
+import base64
+from flask import request, jsonify
+
+# --- Global Vars for Scanning ---
+SCAN_SESSIONS = {}
+server = app.server # חשוב! חשיפת השרת של Flask
+# במקום ngrok, נגדיר את הכתובת של Tailscale
+# אם הרצת את הפקודה tailscale serve כמו שהסברתי למעלה:
+TAILSCALE_URL = "https://laptop-7pk4s1bm.tail8fa467.ts.net:8051/"
 
 # --- Constants & Fields ---
 DYNAMIC_FIELDS_BASE = [
@@ -149,6 +197,18 @@ def create_dynamic_input(id_base, label, is_repeated=False):
 app.layout = dbc.Container([
     dcc.Store(id='bottle-meta-store'),
     dcc.Store(id='sort-state', data={'col': 'bottle_id', 'dir': 'DESC'}),
+# === הוסף את החלק הזה ===
+    dcc.Interval(id='scan-interval', interval=2000, n_intervals=0, disabled=True),
+    dcc.Store(id='scan-session-store'),
+
+    dbc.Modal([
+        dbc.ModalHeader(dbc.ModalTitle("📱 Scan with Phone (Tailscale)")),
+        dbc.ModalBody([
+            html.Div(id='qr-code-container', className="text-center mb-3"),
+            html.P("Scan this QR code with your mobile connected to Tailscale.", className="text-center text-muted"),
+            html.Div(id='scan-status-text', className="text-center font-weight-bold text-primary")
+        ]),
+    ], id="qr-modal", is_open=False),
     
     dbc.Modal([
         dbc.ModalHeader(dbc.ModalTitle("⚠️ Confirm Update")),
@@ -158,8 +218,14 @@ app.layout = dbc.Container([
             dbc.Button("Confirm Update", id="confirm-update-btn", color="danger", n_clicks=0)
         ]),
     ], id="confirmation-modal", is_open=False),
+    
+    dbc.Modal([
+        dbc.ModalHeader(dbc.ModalTitle("⚠️ Validation Error!")),
+        dbc.ModalBody(id='validation_modal'),
 
-    html.H1("🥃 Whisky Manager v6.0 - CLEAN REWRITE", className="my-4 text-center"),
+    ], id="validation_toggle", is_open=False),    
+
+    html.H1("🥃 Alcohol Manager v7.0 - Advanced AI", className="my-4 text-center"),
     dbc.Alert(id='alert-output', is_open=False, duration=6000),
 
     dbc.Tabs([
@@ -176,23 +242,52 @@ app.layout = dbc.Container([
                 ], className="mb-4 border-info"),
 
                 html.H5("Manual Entry", className="mb-3"),
+
+                # ה-Layout המתוקן
                 dbc.Row([
+                    dbc.Col(create_dynamic_input('new-distillery', "Distillery"), width=4),
+                    dbc.Col(create_dynamic_input('new-bottle_name', "Bottle Name"), width=4),
+
                     dbc.Col([
-                        dbc.Input(id='ai-search-input', placeholder="Enter bottle name (e.g. Ardbeg Uigeadail)..."),
-                    ], width=9),
-                    dbc.Col([
-                        dbc.Button("🪄 Magic Fill", id='btn-magic-fill', color="magic", className="w-100"),
-                    ], width=3),
-                ], className="mb-4"),
-                dbc.Row([
-                    create_dynamic_input('new-bottle_name', "Bottle Name"),
-                    create_dynamic_input('new-distillery', "Distillery"),
-                    create_dynamic_input('new-alcohol_type', "Alcohol Type"),
-                ]),
+                        # --- הטריק ליישור ---
+                        # אנחנו מוסיפים כותרת (Label) "שקופה". 
+                        # היא תופסת בדיוק את אותו הגובה כמו הכותרות של ה-Distillery וה-Bottle Name
+                        # וככה דוחפת את הכפתור להיות בדיוק בקו של השדות.
+                        dbc.Label("Spacer", style={"visibility": "hidden"}),
+                        
+                        dbc.Button(
+                            [
+                                html.I(className="fa-solid fa-wand-magic-sparkles me-2"), 
+                                "Magic Fill"
+                            ],
+                            id='btn_magic_fill',
+                            style=magic_btn_style,
+                        )
+                    ], width=2), # הורדתי את ה-className המורכב, ה-Label עושה את העבודה עכשיו
+                                        dbc.Col([
+
+
+
+                        dbc.Label("Spacer", style={"visibility": "hidden"}),
+                        
+                        dbc.Button(
+                            [
+                                html.I(className="fa-solid fa-wand-magic-sparkles me-2"), 
+                                "AI Scan"
+                            ],
+                            id='alc_scan',
+                            style=alc_scan_style,
+                        )
+                    ], width=2), # הורדתי את ה-className המורכב, ה-Label עושה את העבודה עכשיו
+                    
+                ], className="mb-3 g-2"),
+                
+
 
                 dbc.Row([
                     dbc.Col([dbc.Label("Age"), dbc.Input(id='new-age', type='number')], width=2),
                     dbc.Col([dbc.Label("ABV"), dbc.Input(id='new-abv', type='number', step=0.1)], width=2),
+                    create_dynamic_input('new-alcohol_type', "Alcohol Type"),
                     create_dynamic_input('new-origin_country', "Country"),
                     create_dynamic_input('new-region', "Region"),
                 ], className="mb-3"),
@@ -423,11 +518,831 @@ app.layout = dbc.Container([
     ])
 ], className="pb-5")
 
+
+
+
+@server.route('/mobile-upload/<session_id>', methods=['GET', 'POST'])
+def mobile_upload(session_id):
+    if request.method == 'POST':
+        if 'file' not in request.files:
+            return jsonify({"error": "No file part"}), 400
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({"error": "No selected file"}), 400
+
+        try:
+            image_bytes = file.read()
+            
+            # בניית הפרומפט המשוכלל
+            prompt = """
+            You are an expert Whisky Sommelier and Data Extraction Specialist.
+            Your task is to analyze a whisky bottle label image and extract technical data into a strict JSON format.
+
+            ### PHASE 1: DATA EXTRACTION & CALCULATION (INTERNAL LOGIC)
+            1. **Scan for Dates:** Look for "Distilled Date" and "Bottled Date". 
+               - ACTION: Calculate the specific AGE. (e.g., if Distilled 2019 and Bottled 2025, Age is ~5-6 years). 
+               - If no age statement exists but dates do, YOU MUST CALCULATE IT.
+            2. **Identify Distillery & Origin:** - Recognize logos (e.g., "M&H" = "Milk & Honey Distillery", Israel).
+               - If the distillery is in a HOT CLIMATE (like Israel, Taiwan, India), assume rapid maturation.
+            3. **Analyze Cask:** Identify the cask type (e.g., "Ex-Moscatel", "Sherry", "Bourbon").
+            4. **Infer Sensory Profile (Flavor/Aroma):** - If tasting notes are on the label, extract them.
+               - IF MISSING: Generate distinct, accurate keywords based on the CASK TYPE + DISTILLERY PROFILE + CLIMATE. 
+               - Example: Young M&H in Moscatel Cask -> Expect: "Honey", "Dried Apricot", "Sweet Spices", "Floral", "Intense Oak".
+
+            ### PHASE 2: STRICT OPERATIONAL PROTOCOLS
+            1. **Exact Match Only:** Do not conflate different versions.
+            2. **Anti-Hallucination:** If a data point is totally unknown (and cannot be inferred by the logic above), return null.
+            3. **Units:** All volumes in ml.
+            4. **Logic for Flags:**
+               - IF "Single Cask" OR "Small Batch" -> Set 'limited': true.
+               - IF "Distillery Exclusive" OR "Single Cask" -> Set 'special': true.
+
+            ### PHASE 3: OUTPUT SCHEMA
+            Return a single JSON object.
+
+            {
+              "bottle_name": string,
+              "distillery": string,
+              "age": number (calculated or stated),
+              "alcohol_percentage": number,
+              "alcohol_type": string (e.g. "Single Malt Whisky"),
+              "origin_country": string,
+              "region": string (e.g. "Tel Aviv" or "Speyside"),
+              "casks": string[] (List of casks, e.g. ["Ex-Moscatel"]),
+              "nose": string[] (List of keywords),
+              "palate": string[] (List of keywords),
+              "orignal_volume": number,
+              "limited": boolean,
+              "special": boolean,
+              "confidence": number (0-1)
+            }
+            """
+            
+            # שליחה ל-Gemini Vision
+            from google.genai import types
+            
+            response = ai_client.models.generate_content(
+                model='gemini-2.0-flash',
+                contents=[
+                    types.Part.from_bytes(data=image_bytes, mime_type=file.content_type),
+                    prompt
+                ],
+                config={
+                    "response_mime_type": "application/json",
+                    "temperature": 0.1 # טמפרטורה נמוכה לדיוק בנתונים
+                }
+            )
+            
+            # ניקוי ופרסור
+            clean_text = response.text.strip()
+            # הסרת Markdown אם קיים
+            if clean_text.startswith('```json'):
+                clean_text = clean_text[7:-3]
+            elif clean_text.startswith('```'):
+                clean_text = clean_text[3:-3]
+            
+            json_result = json.loads(clean_text)
+            
+            # שמירה בזיכרון
+            SCAN_SESSIONS[session_id] = {
+                'status': 'done',
+                'data': json_result
+            }
+            
+            return """
+            <div style="text-align:center; padding:50px; font-family:sans-serif;">
+                <h1 style="color:green; font-size:60px;">✅</h1>
+                <h1>Scan Complete!</h1>
+                <p>Analyzing flavors and calculating age...</p>
+                <p>Check your desktop.</p>
+            </div>
+            """
+            
+        except Exception as e:
+            print(f"Server Error: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    # דף הסריקה למובייל (נשאר ללא שינוי, רק הטופס)
+    return f"""
+    <html>
+        <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>
+                body {{ font-family: -apple-system, sans-serif; text-align: center; padding: 20px; background: #121212; color: white; }}
+                .btn {{ background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: white; padding: 40px 20px; border-radius: 20px; font-size: 24px; font-weight: bold; border: none; width: 100%; margin-top: 50px; display: block; cursor: pointer; }}
+                input {{ display: none; }}
+                .loader {{ border: 5px solid #f3f3f3; border-top: 5px solid #f5576c; border-radius: 50%; width: 50px; height: 50px; animation: spin 1s linear infinite; margin: 20px auto; display: none; }}
+                @keyframes spin {{ 0% {{ transform: rotate(0deg); }} 100% {{ transform: rotate(360deg); }} }}
+            </style>
+        </head>
+        <body>
+            <h2>🥃 AlcScan AI</h2>
+            <p>Scanning for: Flavor Profile, Age Calculation & Cask Data</p>
+            <form method="post" enctype="multipart/form-data" id="uploadForm">
+                <label for="fileInput" class="btn">
+                    📸 Capture Label
+                </label>
+                <input type="file" name="file" id="fileInput" accept="image/*" capture="environment" onchange="document.getElementById('uploadForm').submit(); document.getElementById('loader').style.display='block'; document.querySelector('.btn').style.display='none';">
+                <div id="loader" class="loader"></div>
+            </form>
+        </body>
+    </html>
+    """
+
 # ============================================================================
 # CALLBACKS - UPDATE TAB (CLEAN REWRITE)
 # ============================================================================
 
+#0.25. Auto Bottle Fill
+@app.callback(
+    Output('new-bottle_name-dropdown', 'options', allow_duplicate=True),
+    Input('new-distillery-dropdown', 'value'),
+    State('new-bottle_name-dropdown', 'value'), # <--- הוספנו את זה: שומר על הערך הקיים
+    prevent_initial_call=True
+)
+def auto_fill_bottle(distillery, current_bottle_val):
+    # אם אין מזקקה, מנקים (אלא אם יש ערך קיים שצריך לשמור)
+    if not distillery:
+        return []
 
+    if not client:
+        return []
+
+    # 1. שליפת הרשימה מה-DB כרגיל
+    query = f"""
+        SELECT DISTINCT bottle_name
+        FROM `{TABLE_REF}`
+        WHERE distillery = @distillery
+        ORDER BY bottle_name
+    """
+
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("distillery", "STRING", distillery)
+        ]
+    )
+
+    try:
+        rows = client.query(query, job_config=job_config).result()
+        
+        # בניית הרשימה מה-DB
+        options = [
+            {"label": row.bottle_name, "value": row.bottle_name}
+            for row in rows
+        ]
+        
+        # === התיקון: שימור הערך שהגיע מהסריקה ===
+        # אנחנו בודקים אם יש ערך נוכחי בשדה השם, ואם הוא לא ברשימה - מוסיפים אותו ידנית
+        if current_bottle_val and current_bottle_val != 'ADD_NEW_OPTION':
+            # בדיקה אם הערך כבר קיים ברשימה כדי למנוע כפילויות
+            exists = any(o['value'] == current_bottle_val for o in options)
+            if not exists:
+                # מוסיפים את השם שנסרק לראש הרשימה
+                options.insert(0, {"label": current_bottle_val, "value": current_bottle_val})
+
+        # הוספת אופציית "הוסף חדש" בסוף
+        options.append({
+            "label": "➕ Add New Bottle...",
+            "value": "ADD_NEW_OPTION"
+        })
+
+        return options
+
+    except Exception as e:
+        print("Bottle Query Error:", e)
+        return []
+import json
+import re
+from dash import no_update, ctx
+from dash.dependencies import Input, Output, State
+
+# -----------------------------
+# Helpers (keep near callbacks)
+# -----------------------------
+ADD_NEW_VALUE = "ADD_NEW_OPTION"
+ADD_NEW_LABEL = "➕ Add New Value..."
+
+def _clean_list(lst):
+    """Normalize AI arrays: remove None/empty/commas, de-dupe preserving order."""
+    if not isinstance(lst, list):
+        return []
+    out = []
+    for x in lst:
+        if x is None:
+            continue
+        s = str(x).strip()
+        # remove stray commas-only tokens like "," or " , "
+        s = s.strip(",").strip()
+        if s:
+            out.append(s)
+
+    seen = set()
+    final = []
+    for s in out:
+        if s not in seen:
+            seen.add(s)
+            final.append(s)
+    return final
+
+def _extract_values_from_options(options):
+    """Return a set of existing option values (excluding the add-new option)."""
+    if not options:
+        return set()
+    vals = set()
+    for o in options:
+        if isinstance(o, dict):
+            v = o.get("value")
+            if v and v != ADD_NEW_VALUE:
+                vals.add(str(v))
+    return vals
+
+def _merge_options(existing_options, new_values):
+    """Ensure every new value exists as an option; keep 'Add New' at the end."""
+    existing_options = existing_options or []
+
+    # Remove any existing ADD_NEW entry temporarily
+    base = [o for o in existing_options if isinstance(o, dict) and o.get("value") != ADD_NEW_VALUE]
+
+    existing_vals = _extract_values_from_options(base)
+
+    for v in new_values:
+        v = str(v)
+        if v not in existing_vals:
+            base.append({"label": v, "value": v})
+            existing_vals.add(v)
+
+    # Always keep ADD_NEW at end
+    base.append({"label": ADD_NEW_LABEL, "value": ADD_NEW_VALUE})
+    return base
+
+def _merge_single_options(existing_options, new_value):
+    """
+    Ensure new_value exists in options; keep Add New at end.
+    Returns (options, value_to_set)
+    """
+    existing_options = existing_options or []
+
+    # strip existing ADD_NEW
+    base = [o for o in existing_options if isinstance(o, dict) and o.get("value") != ADD_NEW_VALUE]
+    existing_vals = _extract_values_from_options(base)
+
+    value_to_set = None
+    if new_value is not None:
+        v = str(new_value).strip().strip(",").strip()
+        if v:
+            if v not in existing_vals:
+                base.append({"label": v, "value": v})
+                existing_vals.add(v)
+            value_to_set = v
+
+    base.append({"label": ADD_NEW_LABEL, "value": ADD_NEW_VALUE})
+    return base, value_to_set
+
+# Reset bottle selection if it is currently "Add New..." and distillery changes
+@app.callback(
+    Output("new-bottle_name-dropdown", "value",allow_duplicate=True),
+    Output('new-bottle_name-input', 'value',allow_duplicate=True),
+    Input("new-distillery-dropdown", "value"),
+    State("new-bottle_name-dropdown", "value"),
+    prevent_initial_call=True
+)
+def reset_bottle_if_add_new_selected(distillery, bottle_value):
+    # only clear if the user had selected the Add-New sentinel
+    if bottle_value == ADD_NEW_VALUE:
+        return [],""  # (use [] here if the dropdown is multi=True)
+    return no_update
+
+# -----------------------------
+# 0.5 Auto-Fill AI-Gen Driven
+# -----------------------------
+@app.callback(
+    [
+        Output('validation_toggle', 'is_open'),
+        Output('validation_modal', 'children'),
+
+        Output('new-age', 'value', allow_duplicate=True),
+        Output('new-abv', 'value', allow_duplicate=True),
+
+        Output('new-alcohol_type-dropdown', 'value', allow_duplicate=True),
+        Output('new-origin_country-dropdown', 'value', allow_duplicate=True),
+        Output('new-region-dropdown', 'value', allow_duplicate=True),
+
+        # IMPORTANT: update BOTH options + value for multi dropdowns
+        Output('new-casks_aged_in-dropdown', 'options', allow_duplicate=True),
+        Output('new-casks_aged_in-dropdown', 'value', allow_duplicate=True),
+
+        Output('new-nose-dropdown', 'options', allow_duplicate=True),
+        Output('new-nose-dropdown', 'value', allow_duplicate=True),
+
+        Output('new-palette-dropdown', 'options', allow_duplicate=True),
+        Output('new-palette-dropdown', 'value', allow_duplicate=True),
+
+        Output('new-orignal_volume-dropdown', 'value', allow_duplicate=True),
+
+        Output('new-limited', 'value'),
+        Output('new-special', 'value'),
+        Output('new-origin_country-dropdown', 'options', allow_duplicate=True),
+        Output('new-region-dropdown', 'options', allow_duplicate=True),
+        
+    ],
+    [
+        Input('btn_magic_fill', 'n_clicks'),
+        Input('new-age', 'value'),
+    ],
+    [
+        State('new-bottle_name-input', 'value'),
+        State('new-distillery-input', 'value'),
+        State('new-bottle_name-dropdown', 'value'),
+        State('new-distillery-dropdown', 'value'),
+        State('new-abv', 'value'),
+
+        # read current options so we can merge new AI values into them
+        State('new-casks_aged_in-dropdown', 'options'),
+        State('new-nose-dropdown', 'options'),
+        State('new-palette-dropdown', 'options'),
+        State('new-origin_country-dropdown', 'options'),
+        State('new-region-dropdown', 'options'),
+    ],
+    prevent_initial_call=True
+)
+def master_callback(
+    ai_btn_clicks,
+    manual_age_value,
+    new_bottle_add,
+    new_distillery_add,
+    bottle_name,
+    distillery,
+    current_abv,
+    cask_options,
+    nose_options,
+    palate_options,
+    countries_option,
+    regions_options
+):
+    triggered_id = ctx.triggered_id
+
+    # -----------------------------
+    # Scenario B: manual age change
+    # -----------------------------
+    if triggered_id == 'new-age':
+        is_limited = True if (manual_age_value and int(manual_age_value) > 30) else no_update
+
+        # Return NO changes to options/values except limited if you want
+        return (
+            no_update, no_update,  # validation modal
+            no_update,             # age
+            no_update,             # abv
+            no_update,             # alcohol_type
+            no_update,             # origin_country
+            no_update,             # region
+
+            no_update, no_update,  # casks options/value
+            no_update, no_update,  # nose options/value
+            no_update, no_update,  # palate options/value
+
+            no_update,             # volume
+            is_limited,            # limited
+            no_update, # special
+            no_update ,no_update 
+            
+        )
+
+    # -----------------------------
+    # Scenario A: AI button clicked
+    # -----------------------------
+    if triggered_id == 'btn_magic_fill':
+        # Hard reset values on each click (prevents old selections lingering)
+        reset_age = None
+        reset_abv = None
+        reset_alcohol_type = None
+        reset_country = None
+        reset_region = None
+        reset_casks = []
+        reset_nose = []
+        reset_palate = []
+        reset_volume = None
+        reset_limited = False
+        reset_special = False
+        
+
+        # If missing required inputs, show validation and return cleared fields
+        if not bottle_name or not distillery:
+            return (
+                True, "Please enter Bottle Name and/or Distillery!",
+                reset_age,
+                reset_abv,
+                reset_alcohol_type,
+                reset_country,
+                reset_region,
+                cask_options if cask_options is not None else no_update,  # keep options as-is
+                reset_casks,
+                nose_options if nose_options is not None else no_update,
+                reset_nose,
+                palate_options if palate_options is not None else no_update,
+                reset_palate,
+                reset_volume,
+                reset_limited,
+                reset_special,reset_country,
+                reset_region,
+            )
+        if bottle_name == "ADD_NEW_OPTION":
+            bottle_name = new_bottle_add
+        
+        if distillery == "ADD_NEW_OPTION":
+            distillery = new_distillery_add        
+        try:
+            prompt = f"""
+You are a strict Data Extraction Specialist for a high-end whisky database.
+Your task is to retrieve technical specifications for a specific whisky bottle.
+
+Input Data:
+Bottle Name: "{bottle_name}"
+Distillery: "{distillery}"
+
+### STRICT OPERATIONAL PROTOCOLS:
+
+1.  **Exact Match Only:** Do not conflate different versions. (e.g., If asked for "Laphroaig 10 Cask Strength Batch 12", do NOT return data for Batch 11 or the standard 40% version).
+2.  **Anti-Hallucination:**
+    * If a specific data point (like Cask Type) is not explicitly documented in your training data for this *exact* release, return `null`.
+    * NEVER guess maturation based on color or typical distillery profiles.
+    * NEVER average the ABV of different batches.
+3.  **Official Sources Priority:** Prioritize data from official distillery releases over retailer descriptions.
+4.  **Units:** All volumes must be in milliliters (ml).
+
+### OUTPUT SCHEMA INSTRUCTIONS:
+
+* **alcohol_type**: Specific category (e.g., "Single Malt Whisky", "Blended Scotch Whisky", "Brandy", "Bourbon", "Blended Malt").
+* **casks**: Specific cask types (e.g., "First Fill Ex-Bourbon", "Oloroso Sherry Butt"). Avoid generic terms like "Oak" if possible.
+* **nose/palate**: Extract distinct keywords or short phrases. Do not write full sentences.
+* **limited**: True only for single casks, small batches, or numbered limited editions.
+* **special**: True for distillery exclusives, festival bottlings, or anniversary editions.
+* **regions**: If in scotland, could be from: ("Speyside","Highlands", "The Lowlands").
+### RESPONSE FORMAT:
+
+Return a single JSON object. No markdown formatting.
+
+{{
+  "_reasoning": "Briefly state which specific bottling/version you identified to ensure it matches the input.",
+  "identification_confidence": "High" | "Medium" | "Low"}}
+
+Schema:
+{{
+  "age": number|null,
+  "alcohol_percentage": number|null,
+  "alcohol_type": string|null,
+  "origin_country": string|null,
+  "region": string|null,
+  "casks": string[],
+  "nose": string[],
+  "palate": string[],
+  "orignal_volume": number|null,
+  "limited": boolean,
+  "special": boolean,
+  "confidence": number
+}}
+
+
+Return JSON only.
+""".strip()
+
+            response = ai_client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt,
+                config={
+                    "response_mime_type": "application/json",
+                    "temperature": 0.0
+                }
+            )
+
+            text_resp = response.text
+            
+
+            if not text_resp:
+                raise ValueError("Empty response from AI")
+
+            # With response_mime_type=json, this should already be valid JSON.
+            # Still keep a robust fallback.
+            cleaned = text_resp.strip()
+
+            try:
+                data = json.loads(cleaned)
+            except Exception:
+                m = re.search(r"\[.*\]|\{.*\}", cleaned, re.DOTALL)
+                if not m:
+                    raise ValueError(f"No JSON found in response:\n{text_resp}")
+                data = json.loads(m.group(0))
+
+            # Gemini sometimes returns [ { ... } ]
+            if isinstance(data, list):
+                data = data[0] if data else {}
+                
+# =========================================================
+            # ### DATA QUALITY CHECK ###
+            # =========================================================
+            # אנחנו בודקים 9 שדות מרכזיים. אם יותר מ-40% מהם חסרים, נתריע.
+            # =========================================================
+            
+            fields_to_check = [
+                data.get("age"),
+                data.get("alcohol_percentage"),
+                data.get("alcohol_type"),
+                data.get("origin_country"),
+                data.get("region"),
+                data.get("casks"), # Lists need strict check (empty list = missing)
+                data.get("nose"),
+                data.get("palate"),
+                data.get("orignal_volume")
+            ]
+
+            missing_count = 0
+            for f in fields_to_check:
+                # בדיקה אם הערך הוא None, מחרוזת ריקה, או רשימה ריקה
+                if f is None or f == "" or f == []:
+                    missing_count += 1
+            
+            # 9 שדות סה"כ. 40% מ-9 זה 3.6. כלומר אם חסרים 4 שדות ומעלה -> התראה.
+            show_validation_warning = False
+            validation_message = ""
+
+            if (missing_count / 9) > 0.40:
+                show_validation_warning = True
+                validation_message = html.Div([
+                    html.H4("⚠️ Low Confidence Result", className="text-warning"),
+                    html.P("More than 40% missing data using the Magic Fill tool!", className="lead"),
+                    html.Hr(),
+                    html.P([
+                        "The AI couldn't find enough official data for this specific bottle.",
+                        html.Br(),
+                        html.B("Please try the 'AlcScan' button to scan the label directly.")
+                    ])
+                ])
+            # =========================================================            
+
+            # --- Normalize / clean multi fields
+            casks  = _clean_list(data.get("casks", []))
+            nose   = _clean_list(data.get("nose", []))
+            palate = _clean_list(data.get("palate", []))
+            
+            # --- Merge new values into options so Dash can render them (prevents blank tokens/commas)
+            new_cask_options = _merge_options(cask_options, casks)
+            new_nose_options = _merge_options(nose_options, nose)
+            new_palate_options = _merge_options(palate_options, palate)
+            
+            ai_country = data.get("origin_country")
+
+            if ai_country:
+                ai_country = ai_country.strip()
+
+                if countries_option is None:
+                    countries_option = []
+
+                existing_values = {
+                    str(o.get("value")).strip().lower()
+                    for o in countries_option
+                    if isinstance(o, dict)
+                }
+
+                if ai_country.lower() not in existing_values:
+                    countries_option.append(
+                        {"label": ai_country, "value": ai_country}
+                    )
+                    
+                    
+            ai_region = data.get("region") 
+            
+            if ai_region:
+                ai_region = ai_region.strip()
+
+                if regions_options is None:
+                    regions_options = []
+
+                existing_values_1 = {
+                    str(o.get("value")).strip().lower()
+                    for o in regions_options
+                    if isinstance(o, dict)
+                }
+
+                if ai_region.lower() not in existing_values_1:
+                    regions_options.append(
+                        {"label": ai_region, "value": ai_region}
+                    )        
+                
+            # --- Normalize volume for dropdown (often string-valued options)
+            vol = data.get("orignal_volume")
+            vol = str(vol) if vol is not None else None
+
+
+            return (
+                show_validation_warning, validation_message,
+
+                data.get("age"),
+                data.get("alcohol_percentage"),
+
+                data.get("alcohol_type"),
+                ai_country,             # ✅ new-origin_country-dropdown.value  (string/None)
+                ai_region,
+
+                new_cask_options,
+                casks,
+
+                new_nose_options,
+                nose,
+
+                new_palate_options,
+                palate,
+
+                vol,
+                data.get("limited", False),
+                data.get("special", False),
+                countries_option,         # ✅ new-origin_country-dropdown.options (list[dict]),
+                regions_options
+            )
+
+        except Exception as e:
+            # On error: show message + clear values (but keep current options)
+            return (
+                True, f"AI Error: {str(e)}",
+                reset_age,
+                reset_abv,
+                reset_alcohol_type,
+                reset_country,
+                reset_region,
+
+                cask_options if cask_options is not None else no_update,
+                reset_casks,
+
+                nose_options if nose_options is not None else no_update,
+                reset_nose,
+
+                palate_options if palate_options is not None else no_update,
+                reset_palate,
+
+                reset_volume,
+                reset_limited,
+                reset_special,
+                countries_option,
+                regions_options
+            )
+
+    # Default: no changes
+    return (no_update,) * 19
+
+# 0.75. פתיחת המודל ויצירת QR
+@app.callback(
+    [Output('qr-modal', 'is_open'),
+     Output('qr-code-container', 'children'),
+     Output('scan-session-store', 'data'),
+     Output('scan-interval', 'disabled')],
+    Input('alc_scan', 'n_clicks'),
+    prevent_initial_call=True
+)
+def open_scan_modal(n):
+    if not n: return no_update
+    
+    session_id = str(uuid.uuid4())
+    SCAN_SESSIONS[session_id] = {'status': 'pending'}
+    
+    # שימוש בכתובת ה-Tailscale שלך
+    scan_url = f"{TAILSCALE_URL}/mobile-upload/{session_id}"
+    
+    qr = qrcode.QRCode(box_size=10, border=1)
+    qr.add_data(scan_url)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    img_str = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    
+    return True, html.Img(src=img_str, style={'width': '100%'}), session_id, False
+
+
+# 0.9. האזנה לתוצאות (Polling) - מתוקן
+@app.callback(
+    [Output('qr-modal', 'is_open', allow_duplicate=True),
+     Output('scan-interval', 'disabled', allow_duplicate=True),
+     Output('new-bottle_name-input', 'value', allow_duplicate=True),
+     Output('new-distillery-input', 'value', allow_duplicate=True),
+     Output('new-alcohol_type-dropdown', 'value', allow_duplicate=True),
+     Output('new-origin_country-dropdown', 'value', allow_duplicate=True),
+     Output('new-region-dropdown', 'value', allow_duplicate=True),
+     Output('new-casks_aged_in-dropdown', 'options', allow_duplicate=True),
+     Output('new-casks_aged_in-dropdown', 'value', allow_duplicate=True),
+     Output('new-nose-dropdown', 'options', allow_duplicate=True),
+     Output('new-nose-dropdown', 'value', allow_duplicate=True),
+     Output('new-palette-dropdown', 'options', allow_duplicate=True),
+     Output('new-palette-dropdown', 'value', allow_duplicate=True),
+     Output('new-abv', 'value', allow_duplicate=True),
+     Output('new-age', 'value', allow_duplicate=True),
+     Output('new-orignal_volume-dropdown', 'value', allow_duplicate=True),
+     Output('new-bottle_name-dropdown', 'options', allow_duplicate=True),
+     Output('new-distillery-dropdown', 'options', allow_duplicate=True),
+     # === הוספנו את שני אלה: ===
+     Output('new-bottle_name-dropdown', 'value', allow_duplicate=True),
+     Output('new-distillery-dropdown', 'value', allow_duplicate=True),
+    Output('new-limited', 'value', allow_duplicate=True),
+    Output('new-special', 'value', allow_duplicate=True),
+     
+     ],
+
+    Input('scan-interval', 'n_intervals'),
+    State('scan-session-store', 'data'),
+    [State('new-casks_aged_in-dropdown', 'options'),
+     State('new-nose-dropdown', 'options'),
+     State('new-palette-dropdown', 'options'),
+     State('new-bottle_name-dropdown', 'options'),
+     State('new-distillery-dropdown', 'options')],
+    prevent_initial_call=True
+)
+def poll_scan_status(n, session_id, cask_opts, nose_opts, 
+                     pal_opts, bottle_opts, dist_opts):
+    if not session_id or session_id not in SCAN_SESSIONS:
+        return no_update
+    
+    session = SCAN_SESSIONS[session_id]
+    
+    if session['status'] == 'done':
+        data = session['data']
+        del SCAN_SESSIONS[session_id]
+        
+        print(data)
+        
+        # Helper merge function
+        def merge(opts, new_vals):
+            if not new_vals: return opts, []
+            opts = opts or []
+            existing = {str(o['value']) for o in opts if 'value' in o}
+            vals = []
+            for v in new_vals:
+                if v:
+                    vals.append(str(v))
+                    if str(v) not in existing:
+                        opts.append({'label': str(v), 'value': str(v)})
+            return opts, vals
+
+        # 1. שליפת השם והמזקקה שחזרו מה-AI
+        ai_bottle = data.get('bottle_name')
+        ai_distillery = data.get('distillery')
+        
+        # 2. עדכון האפשרויות (Options) של המזקקה
+        if ai_distillery:
+            ai_distillery = ai_distillery.strip()
+            if dist_opts is None: dist_opts = []
+            existing_dists = {str(o.get("value")).strip().lower() for o in dist_opts if isinstance(o, dict)}
+            
+            if ai_distillery.lower() not in existing_dists:
+                dist_opts.append({"label": ai_distillery, "value": ai_distillery})
+
+        # 3. עדכון האפשרויות (Options) של הבקבוק
+        if ai_bottle:
+            ai_bottle = ai_bottle.strip()
+            if bottle_opts is None: bottle_opts = []
+            existing_bottles = {str(o.get("value")).strip().lower() for o in bottle_opts if isinstance(o, dict)}
+            
+            if ai_bottle.lower() not in existing_bottles:
+                bottle_opts.append({"label": ai_bottle, "value": ai_bottle})
+
+        # 4. עיבוד שאר השדות (חביות, טעמים וכו')
+        casks_list = data.get('casks', [])
+        nose_list = data.get('nose', [])
+        pal_list = data.get('palate', [])
+        
+        new_cask_opts, final_casks = merge(cask_opts, casks_list)
+        new_nose_opts, final_nose = merge(nose_opts, nose_list)
+        new_pal_opts, final_pal = merge(pal_opts, pal_list)
+        
+        vol = data.get("orignal_volume")
+        vol = str(int(vol)) if vol is not None else None
+
+        return (
+            False, # Close Modal
+            True,  # Stop Interval
+            
+            # אנחנו משאירים את הערכים בשדות Input למקרה הצורך, אבל העיקר זה ה-Dropdown למטה
+            ai_bottle,      # new-bottle_name-input
+            ai_distillery,  # new-distillery-input
+            
+            data.get('alcohol_type'),
+            data.get('origin_country'),
+            data.get('region'),
+            new_cask_opts, final_casks,
+            new_nose_opts, final_nose,
+            new_pal_opts, final_pal,
+            data.get('alcohol_percentage'),
+            data.get('age'),
+            vol,
+            bottle_opts,
+            dist_opts,
+
+            
+            # === התיקון: החזרת הערכים ל-Dropdowns עצמם ===
+            ai_bottle,      # new-bottle_name-dropdown (value)
+            ai_distillery ,
+                data.get("limited", False),
+                data.get("special", False),
+        )
+        
+    return no_update
 
 # 1. FETCH BOTTLE DATA (Simple, Clean, Works)
 @app.callback(
@@ -1217,4 +2132,4 @@ def update_sort(n_clicks, current):
 
 
 if __name__ == '__main__':
-    app.run(debug=True, port=8055)
+    app.run(debug=True, host="0.0.0.0", port=8051)
