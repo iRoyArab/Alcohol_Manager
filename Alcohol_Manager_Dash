@@ -11,15 +11,37 @@ import json
 
 # --- Configuration ---
 SERVICE_ACCOUNT_FILE = r"C:\Users\iroyp\OneDrive\שולחן העבודה\TELEGRAM\Telegram-Autoforwarder-master\hopeful-flash-478009-b7-1acfbd3ccca6.json"
+GEMINI_API_KEY = r"C:\Users\iroyp\OneDrive\שולחן העבודה\TELEGRAM\Telegram-Autoforwarder-master\gemini_key_api.txt"
+
 PROJECT_ID = "hopeful-flash-478009-b7"
 DATASET_ID = "Whisky_Collection"
 TABLE_ID = "my_whisky_collection"
 HISTORY_TABLE_ID = "alcohol_update"
 Forecast_id = "consumption_forecast"
-GEMINI_API_KEY = r"C:\Users\iroyp\OneDrive\שולחן העבודה\TELEGRAM\Telegram-Autoforwarder-master\gemini_key_api.txt"
+VIEW_ID = "bottles_flavor_aroma_mapping" # New View
 
 
 
+# --- Range Definitions ---
+SWEETNESS_RANGES = {
+    'Very Sweet': (0, 1.5),
+    'Sweet-Citrucy': (1.51, 2.0),
+    'Citrucy-Spicy': (2.01, 2.75),
+    'Coffee Like- Sea Salt': (2.76, 3.5),
+    'Minerals - Sulfur': (3.51, 5.0),
+    'Ash - BBQ Smoke': (5.01, 7.5),
+    'Heavy Peat - Medicinal Smoke': (7.51, 100.0)
+}
+
+RICHNESS_RANGES = {
+    'Very Watery': (0, 3.0),
+    'Very Delicate': (3.01, 5.3),
+    'Delicate': (5.31, 8.0),
+    'Full Body': (8.01, 10.2),
+    'Rich': (10.21, 12.5),
+    'Very Rich': (12.51, 17.5),
+    'Syrup Like': (17.51, 100.0)
+}
 
 
 # נגדיר את הסטייל כמשתנה כדי שהקוד למטה יישאר נקי
@@ -62,7 +84,7 @@ except Exception as e:
 TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 HISTORY_TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{HISTORY_TABLE_ID}"
 FORECAST_TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{Forecast_id}"
-
+VIEW_REF = f"{PROJECT_ID}.{DATASET_ID}.{VIEW_ID}"
 # --- Init Services ---
 try:
     client = bigquery.Client.from_service_account_json(SERVICE_ACCOUNT_FILE, project=PROJECT_ID)
@@ -443,11 +465,12 @@ app.layout = dbc.Container([
             ]), className="mt-3")
         ]),
         
-        # === TAB 3: SEARCH (unchanged) ===
+# === TAB 3: SEARCH (UPDATED RANGES & SORT) ===
         dbc.Tab(label="🔍 Search Inventory", children=[
             dbc.Card(dbc.CardBody([
                 html.H4("Advanced Whisky Search", className="mb-4 text-primary"),
                 
+                # --- Text Search ---
                 dbc.Row([
                     dbc.Col([
                         dbc.Label("🔎 Free Text Search"),
@@ -455,42 +478,104 @@ app.layout = dbc.Container([
                     ], width=12),
                 ], className="mb-3"),
 
-                dbc.Row([
-                    dbc.Col([
-                        dbc.Label("🛢️ Cask Type (Multi-Select)"),
-                        dcc.Dropdown(id='search-cask', multi=True, placeholder="Select casks...", 
-                                   options=INITIAL_OPTIONS.get('casks_aged_in', []))
-                    ], width=4),
-                    dbc.Col([
-                        dbc.Label("👃 Nose / Scents (Multi-Select)"),
-                        dcc.Dropdown(id='search-nose', multi=True, placeholder="Select scents...", 
-                                   options=INITIAL_OPTIONS.get('nose', []))
-                    ], width=4),
-                    dbc.Col([
-                        dbc.Label("👅 Palette / Flavors (Multi-Select)"),
-                        dcc.Dropdown(id='search-palette', multi=True, placeholder="Select flavors...", 
-                                   options=INITIAL_OPTIONS.get('palette', []))
-                    ], width=4),
+                # --- Toggle for Advanced Search ---
+                html.Div([
+                    dbc.Label("Filter Mode:", className="me-2 fw-bold"),
+                    dbc.RadioItems(
+                        id='search-mode-toggle',
+                        options=[
+                            {'label': 'Standard Flavors (Nose/Palette)', 'value': 'standard'},
+                            {'label': 'Advanced Profile (Sweet/Rich)', 'value': 'advanced'}
+                        ],
+                        value='standard',
+                        inline=True,
+                        inputClassName="btn-check",
+                        labelClassName="btn btn-outline-primary",
+                        labelCheckedClassName="active"
+                    )
                 ], className="mb-3"),
 
+                # --- CONTAINER 1: Standard Flavor Search ---
+                html.Div(id='standard-flavor-container', children=[
+                    dbc.Row([
+                        dbc.Col([
+                            dbc.Label("🛢️ Cask Type"),
+                            dcc.Dropdown(id='search-cask', multi=True, placeholder="Select casks...", options=INITIAL_OPTIONS.get('casks_aged_in', []))
+                        ], width=4),
+                        dbc.Col([
+                            dbc.Label("👃 Nose / Scents"),
+                            dcc.Dropdown(id='search-nose', multi=True, placeholder="Select scents...", options=INITIAL_OPTIONS.get('nose', []))
+                        ], width=4),
+                        dbc.Col([
+                            dbc.Label("👅 Palette / Flavors"),
+                            dcc.Dropdown(id='search-palette', multi=True, placeholder="Select flavors...", options=INITIAL_OPTIONS.get('palette', []))
+                        ], width=4),
+                    ], className="mb-3")
+                ]),
+
+                # --- CONTAINER 2: Advanced Profile Search ---
+                html.Div(id='advanced-flavor-container', style={'display': 'none'}, children=[
+                    dbc.Row([
+                        dbc.Col([
+                            dbc.Label("🍬 Sweetness & Smoke Level"),
+                            dcc.Dropdown(
+                                id='search-sweetness', 
+                                multi=True, 
+                                placeholder="Select sweetness profile...", 
+                                options=[{'label': k, 'value': k} for k in SWEETNESS_RANGES.keys()]
+                            )
+                        ], width=6),
+                        dbc.Col([
+                            dbc.Label("🍯 Richness & Body Level"),
+                            dcc.Dropdown(
+                                id='search-richness', 
+                                multi=True, 
+                                placeholder="Select richness profile...", 
+                                options=[{'label': k, 'value': k} for k in RICHNESS_RANGES.keys()]
+                            )
+                        ], width=6),
+                    ], className="mb-3")
+                ]),
+
+                # --- General Filters ---
                 dbc.Row([
-                    dbc.Col([dbc.Label("🌍 Country"), dcc.Dropdown(id='search-country', options=INITIAL_OPTIONS.get('origin_country', []), placeholder="All")], width=2),
-                    dbc.Col([dbc.Label("🏭 Distillery"), dcc.Dropdown(id='search-distillery', options=INITIAL_OPTIONS.get('distillery', []), placeholder="All")], width=2),
-                    dbc.Col([dbc.Label("🥃 Type"), dcc.Dropdown(id='search-alcohol-type', options=INITIAL_OPTIONS.get('alcohol_type', []), placeholder="Type")], width=2),
-                    dbc.Col([dbc.Label("🧪 Min ABV"), dbc.Input(id='search-abv', type='number', step=0.1, placeholder="Any")], width=1),
-                    dbc.Col([dbc.Label("⏳ Min Age"), dbc.Input(id='search-age', type='number', placeholder="Any")], width=1),
+                    dbc.Col([dbc.Label("🌍 Country"), dcc.Dropdown(id='search-country', options=INITIAL_OPTIONS.get('origin_country', []), placeholder="All")], width=3),
+                    dbc.Col([dbc.Label("🏭 Distillery"), dcc.Dropdown(id='search-distillery', options=INITIAL_OPTIONS.get('distillery', []), placeholder="All")], width=3),
+                    dbc.Col([dbc.Label("🥃 Type"), dcc.Dropdown(id='search-alcohol-type', options=INITIAL_OPTIONS.get('alcohol_type', []), placeholder="Type")], width=3),
+                ], className="mb-3"),
+
+                html.Hr(),
+                html.H6("📏 Technical Ranges (Min - Max)", className="text-muted mb-3"),
+                
+                # --- Range Filters (New Layout) ---
+                dbc.Row([
+                    # ABV Range
+                    dbc.Col([
+                        dbc.Label("🧪 ABV % Range"),
+                        dbc.InputGroup([
+                            dbc.Input(id='search-abv-min', type='number', step=0.1, placeholder="Min"),
+                            dbc.InputGroupText("-"),
+                            dbc.Input(id='search-abv-max', type='number', step=0.1, placeholder="Max"),
+                        ])
+                    ], width=4),
                     
+                    # Age Range
+                    dbc.Col([
+                        dbc.Label("⏳ Age (Years)"),
+                        dbc.InputGroup([
+                            dbc.Input(id='search-age-min', type='number', placeholder="Min"),
+                            dbc.InputGroupText("-"),
+                            dbc.Input(id='search-age-max', type='number', placeholder="Max"),
+                        ])
+                    ], width=4),
+                    
+                    # Stock Range
                     dbc.Col([
                         dbc.Label("📊 Stock Level %"),
                         dbc.InputGroup([
-                            dbc.Input(id='search-stock-val', type='number', min=0, max=100, placeholder="Val"),
-                            dbc.InputGroupText(
-                                dcc.RadioItems(
-                                    id='search-stock-mode',
-                                    options=[{'label': ' Min (≥)', 'value': 'min'}, {'label': ' Max (≤)', 'value': 'max'}],
-                                    value='min', inline=True, labelStyle={'marginRight': '5px', 'marginLeft': '5px'}
-                                )
-                            )
+                            dbc.Input(id='search-stock-min', type='number', min=0, max=100, placeholder="Min"),
+                            dbc.InputGroupText("-"),
+                            dbc.Input(id='search-stock-max', type='number', min=0, max=100, placeholder="Max"),
                         ])
                     ], width=4),
                 ], className="mb-4"),
@@ -498,20 +583,13 @@ app.layout = dbc.Container([
                 dbc.Button("Run Search", id='btn-run-search', color="primary", size="lg", className="w-100 mb-4"),
 
                 html.Hr(),
-                
-                html.Div([
-                    html.H5("Search Results:", className="d-inline-block mr-3"),
-                    dbc.Badge("0 Records", id='search-count-badge', color="info", className="p-2", style={'fontSize': '1em'})
-                ], className="mb-3"),
-                
+                html.Div([html.H5("Search Results:", className="d-inline-block mr-3"), dbc.Badge("0 Records", id='search-count-badge', color="info", className="p-2", style={'fontSize': '1em'})], className="mb-3"),
                 dcc.Loading(html.Div(id='search-results-area')),
-
                 html.Div([
                     dbc.Button("Previous", id='btn-prev-page', color="secondary", outline=True, disabled=True, className="mr-2"),
                     html.Span(id='page-display', children="Page 1", className="align-middle font-weight-bold mx-3"),
                     dbc.Button("Next", id='btn-next-page', color="secondary", outline=True, disabled=True, className="ml-2"),
                 ], className="d-flex justify-content-center mt-4 mb-5"),
-
                 dcc.Store(id='page-store', data=0) 
             ]))
         ]),
@@ -1956,6 +2034,18 @@ def insert_bottles(n, *args):
 # CALLBACKS - SEARCH TAB
 # ============================================================================
 
+# --- Search Mode Toggle Callback ---
+@app.callback(
+    [Output('standard-flavor-container', 'style'),
+     Output('advanced-flavor-container', 'style')],
+    Input('search-mode-toggle', 'value')
+)
+def toggle_search_mode(mode):
+    if mode == 'advanced':
+        return {'display': 'none'}, {'display': 'block'}
+    else:
+        return {'display': 'block'}, {'display': 'none'}
+    
 @app.callback(
     [Output('search-results-area', 'children'),
      Output('search-count-badge', 'children'),
@@ -1968,22 +2058,29 @@ def insert_bottles(n, *args):
      Input('btn-prev-page', 'n_clicks'),
      Input('btn-next-page', 'n_clicks')],
     [State('search-text', 'value'),
+     State('search-mode-toggle', 'value'),
+     State('search-sweetness', 'value'),
+     State('search-richness', 'value'),
      State('search-cask', 'value'),
      State('search-nose', 'value'),
      State('search-palette', 'value'),
      State('search-country', 'value'),
      State('search-distillery', 'value'),
      State('search-alcohol-type', 'value'),
-     State('search-abv', 'value'),
-     State('search-age', 'value'),
-     State('search-stock-val', 'value'),
-     State('search-stock-mode', 'value'),
+     # New State Inputs for Ranges
+     State('search-abv-min', 'value'),
+     State('search-abv-max', 'value'),
+     State('search-age-min', 'value'),
+     State('search-age-max', 'value'),
+     State('search-stock-min', 'value'),
+     State('search-stock-max', 'value'),
      State('page-store', 'data')],
     prevent_initial_call=True
 )
-def search_bottles(n, sort_data, n_prev, n_next, txt, casks, noses, palettes, country, dist, alc_type, abv, age, stock_val, stock_mode, page):
-    if not client:
-        return dbc.Alert("DB Error", color="danger"), "Error", 0, "", True, True
+def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_vals, casks, noses, palettes, country, dist, alc_type, 
+                   abv_min, abv_max, age_min, age_max, stock_min, stock_max, page):
+    
+    if not client: return dbc.Alert("DB Error", color="danger"), "Error", 0, "", True, True
     
     triggered = ctx.triggered_id
     page_size = 50
@@ -1997,101 +2094,178 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, casks, noses, palettes, co
     
     offset = page * page_size
     
-    def progress_bar(val):
-        colors = {
-            100: "#006400", 95: "#90EE90", 85: "#FFD700", 70: "#FFB347",
-            50: "#FF8C00", 35: "#FA8072", 20: "#B22222", 10: "#8B0000"
-        }
-        bg = "#808080"
-        for threshold, color in sorted(colors.items(), reverse=True):
-            if val >= threshold:
-                bg = color
-                break
-        
-        text_color = "black" if (val < 25 or (35 <= val < 85) or (85 <= val < 100)) else "white"
-        
-        return html.Div(
-            style={'position': 'relative', 'width': '100%', 'height': '22px',
-                   'backgroundColor': 'white', 'border': '1px solid #ccc', 'borderRadius': '4px'},
-            children=[
-                html.Div(style={'width': f'{val}%', 'height': '100%', 'backgroundColor': bg,
-                               'position': 'absolute', 'transition': 'width 0.5s'}),
-                html.Div(f"{int(val)}%", style={'position': 'absolute', 'width': '100%',
-                                                'textAlign': 'center', 'color': text_color,
-                                                'fontWeight': 'bold', 'lineHeight': '20px'})
-            ]
-        )
-    
+    # --- 1. Base Query ---
     query = f"""
-    SELECT bottle_id, bottle_name, distillery, region, alcohol_percentage, age, price, stock_status_per, alcohol_type,
+    SELECT t1.bottle_id, t1.bottle_name, t1.distillery, t1.region, t1.alcohol_percentage, 
+           t1.age, t1.price, t1.stock_status_per, t1.alcohol_type,
+           t2.final_smoky_sweet_score, t2.final_richness_score,
            COUNT(*) OVER() as total_rows
-    FROM `{TABLE_REF}`
-    WHERE 1=1
+    FROM `{TABLE_REF}` t1
     """
     
+    # --- 2. Always LEFT JOIN ---
+    query += f" LEFT JOIN `{VIEW_REF}` t2 ON t1.bottle_name = t2.bottle_name AND t1.distillery = t2.distillery "
+    
+    # --- 3. WHERE Clause ---
+    query += " WHERE 1=1 " 
+    
+    # --- 4. Apply Filters ---
     if txt:
         safe = txt.replace("'", "\\'")
-        query += f" AND (LOWER(bottle_name) LIKE '%{safe.lower()}%' OR LOWER(distillery) LIKE '%{safe.lower()}%')"
-    if country: query += f" AND origin_country = '{country}'"
-    if dist: query += f" AND distillery = '{dist}'"
-    if alc_type: query += f" AND alcohol_type = '{alc_type}'"
-    if abv: query += f" AND alcohol_percentage >= {abv}"
-    if age: query += f" AND age >= {age}"
-    if stock_val is not None:
-        op = "<=" if stock_mode == 'max' else ">="
-        query += f" AND stock_status_per {op} {stock_val}"
+        query += f" AND (LOWER(t1.bottle_name) LIKE '%{safe.lower()}%' OR LOWER(t1.distillery) LIKE '%{safe.lower()}%')"
+    if country: query += f" AND t1.origin_country = '{country}'"
+    if dist: query += f" AND t1.distillery = '{dist}'"
+    if alc_type: query += f" AND t1.alcohol_type = '{alc_type}'"
     
-    if casks:
-        casks_str = ", ".join([f"'{c}'" for c in casks])
-        query += f" AND EXISTS(SELECT 1 FROM UNNEST(casks_aged_in) c WHERE c IN ({casks_str}))"
-    if noses:
-        noses_str = ", ".join([f"'{n}'" for n in noses])
-        query += f" AND EXISTS(SELECT 1 FROM UNNEST(nose) n WHERE n IN ({noses_str}))"
-    if palettes:
-        pal_str = ", ".join([f"'{p}'" for p in palettes])
-        query += f" AND EXISTS(SELECT 1 FROM UNNEST(palette) p WHERE p IN ({pal_str}))"
+    # --- Range Filters Logic ---
+    # ABV
+    if abv_min is not None: query += f" AND t1.alcohol_percentage >= {abv_min}"
+    if abv_max is not None: query += f" AND t1.alcohol_percentage <= {abv_max}"
     
+    # Age
+    if age_min is not None: query += f" AND t1.age >= {age_min}"
+    if age_max is not None: query += f" AND t1.age <= {age_max}"
+    
+    # Stock
+    if stock_min is not None: query += f" AND t1.stock_status_per >= {stock_min}"
+    if stock_max is not None: query += f" AND t1.stock_status_per <= {stock_max}"
+
+    # --- 5. Mode Specific Filters ---
+    if mode == 'standard':
+        if casks:
+            casks_str = ", ".join([f"'{c}'" for c in casks])
+            query += f" AND EXISTS(SELECT 1 FROM UNNEST(t1.casks_aged_in) c WHERE c IN ({casks_str}))"
+        if noses:
+            noses_str = ", ".join([f"'{n}'" for n in noses])
+            query += f" AND EXISTS(SELECT 1 FROM UNNEST(t1.nose) n WHERE n IN ({noses_str}))"
+        if palettes:
+            pal_str = ", ".join([f"'{p}'" for p in palettes])
+            query += f" AND EXISTS(SELECT 1 FROM UNNEST(t1.palette) p WHERE p IN ({pal_str}))"
+            
+    elif mode == 'advanced':
+        if sweet_vals:
+            clauses = []
+            for label in sweet_vals:
+                if label in SWEETNESS_RANGES:
+                    min_val, max_val = SWEETNESS_RANGES[label]
+                    clauses.append(f"(t2.final_smoky_sweet_score BETWEEN {min_val} AND {max_val})")
+            if clauses:
+                query += f" AND ({' OR '.join(clauses)})"
+        
+        if rich_vals:
+            clauses = []
+            for label in rich_vals:
+                if label in RICHNESS_RANGES:
+                    min_val, max_val = RICHNESS_RANGES[label]
+                    clauses.append(f"(t2.final_richness_score BETWEEN {min_val} AND {max_val})")
+            if clauses:
+                query += f" AND ({' OR '.join(clauses)})"
+    
+    # --- 6. Sorting & Limit ---
     sort_col = sort_data.get('col', 'bottle_id')
     sort_dir = sort_data.get('dir', 'DESC')
-    allowed = ['bottle_id', 'bottle_name', 'alcohol_type', 'distillery', 'region',
-               'alcohol_percentage', 'age', 'price', 'stock_status_per']
-    if sort_col not in allowed:
-        sort_col = 'bottle_id'
     
-    query += f" ORDER BY {sort_col} {sort_dir} LIMIT {page_size} OFFSET {offset}"
+    # Mapping Display Columns to SQL Columns for Sorting
+    # This allows sorting by the hidden Score columns when clicking the Text column header
+    sort_map = {
+        'bottle_id': 't1.bottle_id',
+        'bottle_name': 't1.bottle_name',
+        'distillery': 't1.distillery',
+        'region': 't1.region',
+        'alcohol_percentage': 't1.alcohol_percentage',
+        'age': 't1.age',
+        'price': 't1.price',
+        'stock_status_per': 't1.stock_status_per',
+        'alcohol_type': 't1.alcohol_type',
+        # Special Mapping for Flavors: Sort by Score, not Label Text!
+        'sweetness_level': 't2.final_smoky_sweet_score',
+        'richness_level': 't2.final_richness_score'
+    }
+
+    sql_sort_col = sort_map.get(sort_col, 't1.bottle_id')
+    
+    query += f" ORDER BY {sql_sort_col} {sort_dir} LIMIT {page_size} OFFSET {offset}"
     
     try:
         rows = list(client.query(query).result())
         
+        # --- Helper Functions ---
+        def get_label(score, ranges):
+            if score is None: return "-"
+            for label, (min_v, max_v) in ranges.items():
+                if min_v <= float(score) <= max_v:
+                    return label
+            return str(score)
+
+        def progress_bar(val):
+            colors = {
+                100: "#006400", 95: "#90EE90", 85: "#FFD700", 70: "#FFB347",
+                50: "#FF8C00", 35: "#FA8072", 20: "#B22222", 10: "#8B0000"
+            }
+            bg = "#808080"
+            for threshold, color in sorted(colors.items(), reverse=True):
+                if val >= threshold:
+                    bg = color
+                    break
+            text_color = "black" if (val < 25 or (35 <= val < 85) or (85 <= val < 100)) else "white"
+            return html.Div(
+                style={'position': 'relative', 'width': '100%', 'height': '22px',
+                       'backgroundColor': 'white', 'border': '1px solid #ccc', 'borderRadius': '4px'},
+                children=[
+                    html.Div(style={'width': f'{val}%', 'height': '100%', 'backgroundColor': bg,
+                                   'position': 'absolute', 'transition': 'width 0.5s'}),
+                    html.Div(f"{int(val)}%", style={'position': 'absolute', 'width': '100%',
+                                                    'textAlign': 'center', 'color': text_color,
+                                                    'fontWeight': 'bold', 'lineHeight': '20px'})
+                ]
+            )
+
         if not rows:
             return dbc.Alert("No results", color="warning"), "0", 0, "Page 1", True, True
         
         total = rows[0].total_rows
         total_pages = (total + page_size - 1) // page_size
         
+        # Table Headers with Sort IDs
         cols = [
-            ("ID", "bottle_id"), ("Name", "bottle_name"), ("Type", "alcohol_type"),
-            ("Distillery", "distillery"), ("Region", "region"), ("ABV", "alcohol_percentage"),
-            ("Age", "age"), ("Price", "price"), ("Stock", "stock_status_per")
+            ("ID", "bottle_id"), 
+            ("Name", "bottle_name"), 
+            ("Distillery", "distillery"),
+            ("Sweetness", "sweetness_level"), 
+            ("Richness", "richness_level"),   
+            ("Region", "region"), 
+            ("ABV", "alcohol_percentage"),
+            ("Age", "age"), 
+            ("Price", "price"), 
+            ("Stock", "stock_status_per")
         ]
         
         headers = []
         for label, field in cols:
+            # Determine Icon
             icon = ""
             if field == sort_col:
                 icon = " ⬇️" if sort_dir == 'DESC' else " ⬆️"
+            
             headers.append(
-                html.Th(f"{label}{icon}", id={'type': 'sort-head', 'index': field},
-                       style={'cursor': 'pointer', 'userSelect': 'none'})
+                html.Th(
+                    f"{label}{icon}", 
+                    id={'type': 'sort-head', 'index': field},
+                    style={'cursor': 'pointer', 'userSelect': 'none', 'whiteSpace': 'nowrap'}
+                )
             )
         
         body = []
         for r in rows:
+            sweet_txt = get_label(r.final_smoky_sweet_score, SWEETNESS_RANGES)
+            rich_txt = get_label(r.final_richness_score, RICHNESS_RANGES)
+
             body.append(html.Tr([
                 html.Td(r.bottle_id),
-                html.Td(r.bottle_name, style={'fontWeight': 'bold'}),
-                html.Td(r.alcohol_type),
                 html.Td(r.distillery),
+                html.Td(r.bottle_name, style={'fontWeight': 'bold'}),
+                html.Td(dbc.Badge(sweet_txt, color="light", className="text-dark border")),
+                html.Td(dbc.Badge(rich_txt, color="light", className="text-dark border")), 
                 html.Td(r.region),
                 html.Td(f"{r.alcohol_percentage}%"),
                 html.Td(r.age if r.age else "-"),
@@ -2100,35 +2274,15 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, casks, noses, palettes, co
             ]))
         
         table = dbc.Table([html.Thead(html.Tr(headers)), html.Tbody(body)],
-                         bordered=True, hover=True, striped=True, responsive=True)
+                          bordered=True, hover=True, striped=True, responsive=True)
         
         return (table, f"{total} Records", page, f"Page {page+1} of {total_pages}",
                 page == 0, (page + 1) >= total_pages)
         
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return dbc.Alert(f"Error: {e}", color="danger"), "Error", 0, "", True, True
-
-
-@app.callback(
-    Output('sort-state', 'data'),
-    Input({'type': 'sort-head', 'index': ALL}, 'n_clicks'),
-    State('sort-state', 'data'),
-    prevent_initial_call=True
-)
-def update_sort(n_clicks, current):
-    if not any(n_clicks):
-        return no_update
-    
-    triggered = ctx.triggered_id
-    if not triggered:
-        return no_update
-    
-    col = triggered['index']
-    new_dir = 'ASC'
-    if current['col'] == col:
-        new_dir = 'DESC' if current['dir'] == 'ASC' else 'ASC'
-    
-    return {'col': col, 'dir': new_dir}
 
 
 if __name__ == '__main__':
