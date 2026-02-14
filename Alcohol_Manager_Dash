@@ -26,10 +26,10 @@ VIEW_ID = "bottles_flavor_aroma_mapping" # New View
 SWEETNESS_RANGES = {
     'Very Sweet': (0, 1.5),
     'Sweet-Citrucy': (1.51, 2.0),
-    'Citrucy-Spicy': (2.01, 2.75),
-    'Coffee Like- Sea Salt': (2.76, 3.5),
-    'Minerals - Sulfur': (3.51, 5.0),
-    'Ash - BBQ Smoke': (5.01, 7.5),
+    'Citrucy-Spicy': (2.01, 2.749),
+    'Coffee Like- Sea Salt': (2.75, 4.0),
+    'Minerals - Sulfur': (4.01, 5.5),
+    'Ash - BBQ Smoke': (5.51, 7.5),
     'Heavy Peat - Medicinal Smoke': (7.51, 100.0)
 }
 
@@ -2207,7 +2207,7 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_val
                 if val >= threshold:
                     bg = color
                     break
-            text_color = "black" if (val < 25 or (35 <= val < 85) or (85 <= val < 100)) else "white"
+            text_color = "black" if (val < 25 or (35 <= val < 85) or (85 <= val < 100)) else "black"
             return html.Div(
                 style={'position': 'relative', 'width': '100%', 'height': '22px',
                        'backgroundColor': 'white', 'border': '1px solid #ccc', 'borderRadius': '4px'},
