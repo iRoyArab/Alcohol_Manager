@@ -71,6 +71,9 @@ alc_scan_style = {
     'width': '100%'
 }
 
+
+
+    
 # Open and read API Key
 try:
     with open(GEMINI_API_KEY, "r", encoding="utf-8") as f:
@@ -2034,6 +2037,38 @@ def insert_bottles(n, *args):
 # CALLBACKS - SEARCH TAB
 # ============================================================================
 
+# ========================================================================
+# SEARCH TABLE - CLICK-TO-SORT (updates dcc.Store('sort-state'))
+# ========================================================================
+@app.callback(
+    Output('sort-state', 'data'),
+    Input({'type': 'sort-head', 'index': ALL}, 'n_clicks'),
+    State({'type': 'sort-head', 'index': ALL}, 'id'),
+    State('sort-state', 'data'),
+    prevent_initial_call=True
+)
+def update_sort_state(n_clicks_list, header_ids, current_sort):
+    # ctx.triggered_id will be the dict id of the clicked header:
+    # {'type': 'sort-head', 'index': '<field>'}
+    trig = ctx.triggered_id
+    if not isinstance(trig, dict) or trig.get('type') != 'sort-head':
+        return no_update
+
+    clicked_col = trig.get('index')
+    if not clicked_col:
+        return no_update
+
+    current_sort = current_sort or {}
+    cur_col = current_sort.get('col', 'bottle_id')
+    cur_dir = current_sort.get('dir', 'DESC')
+
+    # Toggle direction if same column, else switch column and default to DESC
+    if clicked_col == cur_col:
+        new_dir = 'ASC' if cur_dir == 'DESC' else 'DESC'
+        return {'col': cur_col, 'dir': new_dir}
+
+    return {'col': clicked_col, 'dir': 'DESC'}
+
 # --- Search Mode Toggle Callback ---
 @app.callback(
     [Output('standard-flavor-container', 'style'),
@@ -2077,6 +2112,8 @@ def toggle_search_mode(mode):
      State('page-store', 'data')],
     prevent_initial_call=True
 )
+
+
 def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_vals, casks, noses, palettes, country, dist, alc_type, 
                    abv_min, abv_max, age_min, age_max, stock_min, stock_max, page):
     
@@ -2093,6 +2130,7 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_val
         page = max(0, page - 1)
     
     offset = page * page_size
+    
     
     # --- 1. Base Query ---
     query = f"""
@@ -2219,6 +2257,80 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_val
                                                     'fontWeight': 'bold', 'lineHeight': '20px'})
                 ]
             )
+            
+        
+                    
+        # --- Badge Color Helpers (Sweetness/Richness) ---
+        def _hex_to_rgb(h):
+            h = h.lstrip("#")
+            return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+        def _rgb_to_hex(rgb):
+            return "#{:02x}{:02x}{:02x}".format(*rgb)
+
+        def _lerp(a, b, t):
+            return a + (b - a) * t
+
+        def _clamp(x, lo, hi):
+            return max(lo, min(hi, x))
+
+        def _interp_hex(c1, c2, t):
+            r1, g1, b1 = _hex_to_rgb(c1)
+            r2, g2, b2 = _hex_to_rgb(c2)
+            r = int(round(_lerp(r1, r2, t)))
+            g = int(round(_lerp(g1, g2, t)))
+            b = int(round(_lerp(b1, b2, t)))
+            return _rgb_to_hex((r, g, b))
+        
+        
+
+        def _is_dark_bg(hex_color):
+            r, g, b = _hex_to_rgb(hex_color)
+            # perceived luminance (sRGB-ish)
+            lum = 0.2126 * (r / 255) + 0.7152 * (g / 255) + 0.0722 * (b / 255)
+            return lum < 0.55  # tweakable threshold
+
+        def badge_style_sweet(score):
+            if score is None:
+                bg = "#f8f9fa"
+            else:
+                # האצת הגרדיינט (power curve)
+                t = _clamp((float(score) / 7.5) ** 0.6, 0.0, 1.0)
+
+                # ורוד בהיר מאוד -> כמעט שחור
+                bg = _interp_hex("#ffd6ec", "#2b2b2b", t)
+
+            return {
+                "backgroundColor": bg,
+                "color": ("#ffffff" if _is_dark_bg(bg) else "#000000"),
+                "fontWeight": "700",
+                "borderRadius": "10px",
+                "padding": "6px 10px",
+                "display": "inline-block",
+                "whiteSpace": "nowrap",
+            }
+
+        def badge_style_rich(score):
+            if score is None:
+                bg = "#f8f9fa"
+            else:
+                t = _clamp((float(score) / 17.5) ** 0.7, 0.0, 1.0)
+
+                # לבן -> חום כהה עמוק
+                bg = _interp_hex("#ffffff", "#3b1f0f", t)
+
+            return {
+                "backgroundColor": bg,
+                "color": ("#ffffff" if _is_dark_bg(bg) else "#000000"),
+                "fontWeight": "700",
+                "borderRadius": "10px",
+                "padding": "6px 10px",
+                "display": "inline-block",
+                "whiteSpace": "nowrap",
+            }  
+            
+
+      
 
         if not rows:
             return dbc.Alert("No results", color="warning"), "0", 0, "Page 1", True, True
@@ -2227,12 +2339,17 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_val
         total_pages = (total + page_size - 1) // page_size
         
         # Table Headers with Sort IDs
+# --- Inside search_bottles after defining 'total' ---
+
+# Table Headers with Sort IDs
         cols = [
             ("ID", "bottle_id"), 
             ("Name", "bottle_name"), 
             ("Distillery", "distillery"),
-            ("Sweetness", "sweetness_level"), 
-            ("Richness", "richness_level"),   
+            ("Sweetness Level", "sweetness_level"), 
+
+            ("Richness Level", "richness_level"), 
+
             ("Region", "region"), 
             ("ABV", "alcohol_percentage"),
             ("Age", "age"), 
@@ -2249,29 +2366,55 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_val
             
             headers.append(
                 html.Th(
-                    f"{label}{icon}", 
+                    f"{label}{icon}",
                     id={'type': 'sort-head', 'index': field},
+                    n_clicks=0,
                     style={'cursor': 'pointer', 'userSelect': 'none', 'whiteSpace': 'nowrap'}
                 )
             )
         
         body = []
         for r in rows:
-            sweet_txt = get_label(r.final_smoky_sweet_score, SWEETNESS_RANGES)
-            rich_txt = get_label(r.final_richness_score, RICHNESS_RANGES)
+                    # 1. שליפת הערכים והטקסטים
+                    s_val = r.final_smoky_sweet_score
+                    r_val = r.final_richness_score
+                    
+                    label_sweet = get_label(s_val, SWEETNESS_RANGES)
+                    label_rich = get_label(r_val, RICHNESS_RANGES)
 
-            body.append(html.Tr([
-                html.Td(r.bottle_id),
-                html.Td(r.distillery),
-                html.Td(r.bottle_name, style={'fontWeight': 'bold'}),
-                html.Td(dbc.Badge(sweet_txt, color="light", className="text-dark border")),
-                html.Td(dbc.Badge(rich_txt, color="light", className="text-dark border")), 
-                html.Td(r.region),
-                html.Td(f"{r.alcohol_percentage}%"),
-                html.Td(r.age if r.age else "-"),
-                html.Td(f"{int(r.price)}₪" if r.price else "-"),
-                html.Td(progress_bar(r.stock_status_per), style={'width': '140px'})
-            ]))
+                    # יצירת הטקסט לתצוגה
+                    sweet_display = f"{label_sweet} - {s_val:.1f}" if s_val is not None else label_sweet
+                    rich_display = f"{label_rich} - {r_val:.1f}" if r_val is not None else label_rich
+
+                    # 2. שינוי קריטי: החלפנו את dbc.Badge ב-html.Span
+                    # הוספנו את ה-Class 'badge' ו-'rounded-pill' כדי שזה ייראה בול כמו Badge
+                    # אבל בלי ההתנגשות של צבעי הרקע
+                    
+                    body.append(html.Tr([
+                        html.Td(r.bottle_id),
+                        html.Td(r.distillery),
+                        html.Td(r.bottle_name, style={'fontWeight': 'bold'}),
+                        
+                        # --- Sweetness Badge ---
+                        html.Td(html.Span(
+                            sweet_display, 
+                            style=badge_style_sweet(s_val), 
+                            className="badge border rounded-pill w-100" # w-100 ימלא את התא, rounded-pill יעגל פינות
+                        )),
+                        
+                        # --- Richness Badge ---
+                        html.Td(html.Span(
+                            rich_display, 
+                            style=badge_style_rich(r_val), 
+                            className="badge border rounded-pill w-100"
+                        )), 
+
+                        html.Td(r.region),
+                        html.Td(f"{r.alcohol_percentage}%"),
+                        html.Td(r.age if r.age else "-"),
+                        html.Td(f"{int(r.price)}₪" if r.price else "-"),
+                        html.Td(progress_bar(r.stock_status_per), style={'width': '140px'})
+                    ]))
         
         table = dbc.Table([html.Thead(html.Tr(headers)), html.Tbody(body)],
                           bordered=True, hover=True, striped=True, responsive=True)
