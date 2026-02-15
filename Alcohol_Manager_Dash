@@ -2289,45 +2289,153 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_val
             # perceived luminance (sRGB-ish)
             lum = 0.2126 * (r / 255) + 0.7152 * (g / 255) + 0.0722 * (b / 255)
             return lum < 0.55  # tweakable threshold
+        
+        def _lerp_color_by_stops(score, stops):
+            """
+            stops: list of (value, hex_color) sorted ascending by value
+            returns: interpolated hex
+            """
+            s = float(score)
 
-        def badge_style_sweet(score):
+            # clamp to edges
+            if s <= stops[0][0]:
+                return stops[0][1]
+            if s >= stops[-1][0]:
+                return stops[-1][1]
+
+            # find segment
+            for (v0, c0), (v1, c1) in zip(stops, stops[1:]):
+                if v0 <= s <= v1:
+                    t = (s - v0) / (v1 - v0) if v1 != v0 else 0.0
+                    t = _clamp(t, 0.0, 1.0)
+                    return _interp_hex(c0, c1, t)
+
+            # safety fallback (shouldn't happen)
+            return stops[-1][1]
+
+
+        def badge_style_sweet(score, label=None):
+            # --- Continuous spectrum stops (tuned to your palette progression) ---
+            # You can tweak values later, but this already yields a smooth progression.
+            STOPS = [
+                (1.0, "#ffb6c1"),  # very sweet start (pink)
+                (1.9, "#ffcccb"),  # light red
+
+                (2.3, "#ffcc99"),  # orange (sweet-citrucy end)
+                (2.7, "#ffdb58"),  # yellow (citrucy-spicy end)
+
+                (3.9, "#d4a017"),  # mustard (coffee like - sea salt end)
+
+                (5.0, "#228b22"),  # forest green (minerals - sulfur end)
+
+                (6.9, "#a9a9a9"),  # dark gray (ash - bbq smoke end)
+
+                (7.9, "#444444"),  # near black (heavy peat end)
+            ]
+
             if score is None:
                 bg = "#f8f9fa"
             else:
-                # האצת הגרדיינט (power curve)
-                t = _clamp((float(score) / 7.5) ** 0.6, 0.0, 1.0)
-
-                # ורוד בהיר מאוד -> כמעט שחור
-                bg = _interp_hex("#ffd6ec", "#2b2b2b", t)
+                try:
+                    bg = _lerp_color_by_stops(score, STOPS)
+                except Exception:
+                    bg = "#f8f9fa"
 
             return {
                 "backgroundColor": bg,
                 "color": ("#ffffff" if _is_dark_bg(bg) else "#000000"),
                 "fontWeight": "700",
-                "borderRadius": "10px",
-                "padding": "6px 10px",
+                "borderRadius": "20px",
+                "padding": "6px 12px",
                 "display": "inline-block",
                 "whiteSpace": "nowrap",
+                "textAlign": "center"
             }
 
-        def badge_style_rich(score):
-            if score is None:
+        import math
+        import re
+
+        def _safe_float(x):
+            if x is None:
+                return None
+            # handle pandas/numpy NaN
+            try:
+                if isinstance(x, float) and math.isnan(x):
+                    return None
+            except Exception:
+                pass
+            # already numeric
+            if isinstance(x, (int, float)):
+                return float(x)
+            # try extract from string (fallback)
+            s = str(x).strip()
+            nums = re.findall(r"[-+]?\d*\.?\d+", s)
+            if not nums:
+                return None
+            try:
+                return float(nums[-1])
+            except Exception:
+                return None
+
+
+        def _lerp_color_by_stops_rich(score, stops):
+            s = float(score)
+
+            if s <= stops[0][0]:
+                return stops[0][1]
+            if s >= stops[-1][0]:
+                return stops[-1][1]
+
+            for (v0, c0), (v1, c1) in zip(stops, stops[1:]):
+                if v0 <= s <= v1:
+                    t = (s - v0) / (v1 - v0) if v1 != v0 else 0.0
+                    t = _clamp(t, 0.0, 1.0)
+                    return _interp_hex(c0, c1, t)
+
+            return stops[-1][1]
+
+
+        def badge_style_rich(score, label=None):
+            """
+            Continuous color scale for Richness across ~5.5 -> 20.6.
+            In your implementation you pass (r_val, rich_display).
+            We'll prioritize score (r_val). If score missing, try label extraction.
+            """
+            s = _safe_float(score)
+            if s is None:
+                s = _safe_float(label)
+
+            if s is None:
                 bg = "#f8f9fa"
             else:
-                t = _clamp((float(score) / 17.5) ** 0.7, 0.0, 1.0)
+                # Stops aligned to your screenshot distribution
+                STOPS = [
+                    (5.5,  "#fff3a0"),  # light yellow (Delicate low)
+                    (7.8,  "#ffd54f"),  # yellow (Delicate high)
 
-                # לבן -> חום כהה עמוק
-                bg = _interp_hex("#ffffff", "#3b1f0f", t)
+                    (8.4,  "#c07a2a"),  # Full Body start
+                    (10.1, "#a8621e"),  # Full Body end
+
+                    (10.3, "#9a5a1d"),  # Rich start
+                    (12.4, "#8f4f1a"),  # Rich end
+
+                    (12.8, "#7a3f15"),  # Very Rich
+
+                    (18.2, "#4a2a12"),  # Syrup Like start
+                    (20.6, "#2b160a"),  # Syrup Like end
+                ]
+                bg = _lerp_color_by_stops_rich(s, STOPS)
 
             return {
                 "backgroundColor": bg,
                 "color": ("#ffffff" if _is_dark_bg(bg) else "#000000"),
                 "fontWeight": "700",
-                "borderRadius": "10px",
-                "padding": "6px 10px",
+                "borderRadius": "20px",
+                "padding": "6px 12px",
                 "display": "inline-block",
                 "whiteSpace": "nowrap",
-            }  
+                "textAlign": "center"
+            }
             
 
       
@@ -2398,16 +2506,17 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_val
                         # --- Sweetness Badge ---
                         html.Td(html.Span(
                             sweet_display, 
-                            style=badge_style_sweet(s_val), 
+                            style=badge_style_sweet(s_val,sweet_display), 
                             className="badge border rounded-pill w-100" # w-100 ימלא את התא, rounded-pill יעגל פינות
                         )),
                         
                         # --- Richness Badge ---
                         html.Td(html.Span(
-                            rich_display, 
-                            style=badge_style_rich(r_val), 
-                            className="badge border rounded-pill w-100"
-                        )), 
+                                            children=rich_display, 
+                                            # מעבירים גם את הציון וגם את הטקסט (בשביל זיהוי הצבע)
+                                            style=badge_style_rich(r_val, rich_display), 
+                                            className="badge border rounded-pill w-100"
+                                        )),
 
                         html.Td(r.region),
                         html.Td(f"{r.alcohol_percentage}%"),
