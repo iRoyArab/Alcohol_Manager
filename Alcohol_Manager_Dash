@@ -221,6 +221,7 @@ def create_dynamic_input(id_base, label, is_repeated=False):
 # --- Layout ---
 app.layout = dbc.Container([
     dcc.Store(id='bottle-meta-store'),
+    dcc.Store(id='details-open-store', data=None),
     dcc.Store(id='sort-state', data={'col': 'bottle_id', 'dir': 'DESC'}),
 # === הוסף את החלק הזה ===
     dcc.Interval(id='scan-interval', interval=2000, n_intervals=0, disabled=True),
@@ -2135,9 +2136,10 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_val
     # --- 1. Base Query ---
     query = f"""
     SELECT t1.bottle_id, t1.bottle_name, t1.distillery, t1.region, t1.alcohol_percentage, 
-           t1.age, t1.price, t1.stock_status_per, t1.alcohol_type,
-           t2.final_smoky_sweet_score, t2.final_richness_score,
-           COUNT(*) OVER() as total_rows
+        t1.age, t1.price, t1.stock_status_per, t1.alcohol_type,
+        t1.nose, t1.palette,
+        t2.final_smoky_sweet_score, t2.final_richness_score,
+        COUNT(*) OVER() as total_rows
     FROM `{TABLE_REF}` t1
     """
     
@@ -2463,7 +2465,8 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_val
             ("ABV", "alcohol_percentage"),
             ("Age", "age"), 
             ("Price", "price"), 
-            ("Stock", "stock_status_per")
+            ("Stock", "stock_status_per"),
+            ("Deatails", "")
         ]
         
         headers = []
@@ -2482,49 +2485,97 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_val
                 )
             )
         
+        def _chips(items):
+            # items could be None, list, or tuple
+            items = items or []
+            if not items:
+                return dbc.Badge("—", color="secondary", pill=True)
+            return html.Div(
+                [dbc.Badge(x, color="secondary", pill=True, className="me-1 mb-1") for x in items],
+                style={"display": "flex", "flexWrap": "wrap", "gap": "6px"}
+            )
+
         body = []
         for r in rows:
-                    # 1. שליפת הערכים והטקסטים
-                    s_val = r.final_smoky_sweet_score
-                    r_val = r.final_richness_score
-                    
-                    label_sweet = get_label(s_val, SWEETNESS_RANGES)
-                    label_rich = get_label(r_val, RICHNESS_RANGES)
+            s_val = r.final_smoky_sweet_score
+            r_val = r.final_richness_score
 
-                    # יצירת הטקסט לתצוגה
-                    sweet_display = f"{label_sweet} - {s_val:.1f}" if s_val is not None else label_sweet
-                    rich_display = f"{label_rich} - {r_val:.1f}" if r_val is not None else label_rich
+            label_sweet = get_label(s_val, SWEETNESS_RANGES)
+            label_rich = get_label(r_val, RICHNESS_RANGES)
 
-                    # 2. שינוי קריטי: החלפנו את dbc.Badge ב-html.Span
-                    # הוספנו את ה-Class 'badge' ו-'rounded-pill' כדי שזה ייראה בול כמו Badge
-                    # אבל בלי ההתנגשות של צבעי הרקע
-                    
-                    body.append(html.Tr([
-                        html.Td(r.bottle_id),
-                        html.Td(r.distillery),
-                        html.Td(r.bottle_name, style={'fontWeight': 'bold'}),
-                        
-                        # --- Sweetness Badge ---
-                        html.Td(html.Span(
-                            sweet_display, 
-                            style=badge_style_sweet(s_val,sweet_display), 
-                            className="badge border rounded-pill w-100" # w-100 ימלא את התא, rounded-pill יעגל פינות
-                        )),
-                        
-                        # --- Richness Badge ---
-                        html.Td(html.Span(
-                                            children=rich_display, 
-                                            # מעבירים גם את הציון וגם את הטקסט (בשביל זיהוי הצבע)
-                                            style=badge_style_rich(r_val, rich_display), 
-                                            className="badge border rounded-pill w-100"
-                                        )),
+            sweet_display = f"{label_sweet} - {s_val:.1f}" if s_val is not None else label_sweet
+            rich_display  = f"{label_rich} - {r_val:.1f}" if r_val is not None else label_rich
 
-                        html.Td(r.region),
-                        html.Td(f"{r.alcohol_percentage}%"),
-                        html.Td(r.age if r.age else "-"),
-                        html.Td(f"{int(r.price)}₪" if r.price else "-"),
-                        html.Td(progress_bar(r.stock_status_per), style={'width': '140px'})
-                    ]))
+            bottle_id_int = int(r.bottle_id)
+
+            # --- Chevron button (▶ / ▼) ---
+            details_btn = dbc.Button(
+                "▶",
+                id={'type': 'details-btn', 'index': bottle_id_int},
+                color="link",
+                size="sm",
+                n_clicks=0,
+                style={
+                    "fontSize": "18px",
+                    "padding": "0",
+                    "fontWeight": "900",
+                    "textDecoration": "none"
+                }
+            )
+
+            # --- Details content ---
+            details_card = dbc.Card(
+                dbc.CardBody([
+                    html.Div([
+                        html.Div([html.Span("👃 Nose: ", style={"fontWeight": "800"}), _chips(list(r.nose) if r.nose else [])]),
+                        html.Div(className="mt-2"),
+                        html.Div([html.Span("👅 Palate: ", style={"fontWeight": "800"}), _chips(list(r.palette) if r.palette else [])]),
+                    ])
+                ], className="py-2"),
+                className="border-0",
+                style={"backgroundColor": "#f8f9fa", "borderRadius": "14px"}
+            )
+
+            # --- Main row ---
+            body.append(html.Tr([
+                html.Td(r.bottle_id),
+                html.Td(r.distillery),
+                html.Td(r.bottle_name, style={'fontWeight': 'bold'}),
+
+                html.Td(html.Span(
+                    sweet_display,
+                    style=badge_style_sweet(s_val, sweet_display),
+                    className="badge border rounded-pill w-100"
+                )),
+
+                html.Td(html.Span(
+                    children=rich_display,
+                    style=badge_style_rich(r_val, rich_display),
+                    className="badge border rounded-pill w-100"
+                )),
+
+                html.Td(r.region),
+                html.Td(f"{r.alcohol_percentage}%"),
+                html.Td(r.age if r.age else "-"),
+                html.Td(f"{int(r.price)}₪" if r.price else "-"),
+                html.Td(progress_bar(r.stock_status_per), style={'width': '140px'}),
+
+                # NEW: chevron cell
+                html.Td(details_btn, style={"width": "40px", "textAlign": "center"})
+            ]))
+
+            # --- Collapsible details row (accordion style) ---
+            body.append(html.Tr([
+                html.Td(
+                    dbc.Collapse(
+                        details_card,
+                        id={'type': 'details-collapse', 'index': bottle_id_int},
+                        is_open=False
+                    ),
+                    colSpan=len(cols),  # IMPORTANT: must span all columns (including details)
+                    style={"padding": "0.25rem 0.75rem"}
+                )
+            ]))
         
         table = dbc.Table([html.Thead(html.Tr(headers)), html.Tbody(body)],
                           bordered=True, hover=True, striped=True, responsive=True)
@@ -2536,6 +2587,54 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_val
         import traceback
         traceback.print_exc()
         return dbc.Alert(f"Error: {e}", color="danger"), "Error", 0, "", True, True
+    
+    
+from dash import ctx
+
+@app.callback(
+    Output('details-open-store', 'data'),
+    Input({'type': 'details-btn', 'index': ALL}, 'n_clicks'),
+    State('details-open-store', 'data'),
+    prevent_initial_call=True
+)
+def toggle_one_row_open(_clicks, currently_open):
+    trig = ctx.triggered_id
+    if not ctx.triggered or ctx.triggered[0].get("value") in (None, 0):
+        return dash.no_update
+    
+    if not trig:
+        return currently_open
+
+    bid = trig['index']
+
+    # click same -> close
+    if currently_open == bid:
+        return None
+
+    # open only this one
+    return bid
+
+
+@app.callback(
+    Output({'type': 'details-collapse', 'index': ALL}, 'is_open'),
+    Input('details-open-store', 'data'),
+    State({'type': 'details-collapse', 'index': ALL}, 'id'),
+)
+def sync_details_collapses(open_id, ids):
+    if open_id is None:
+        return [False] * len(ids)
+    return [i['index'] == open_id for i in ids]
+
+
+@app.callback(
+    Output({'type': 'details-btn', 'index': ALL}, 'children'),
+    Input('details-open-store', 'data'),
+    State({'type': 'details-btn', 'index': ALL}, 'id'),
+)
+def sync_chevrons(open_id, ids):
+    if open_id is None:
+        return ["▶"] * len(ids)
+    return ["▼" if i['index'] == open_id else "▶" for i in ids]
 
 
 if __name__ == '__main__':
