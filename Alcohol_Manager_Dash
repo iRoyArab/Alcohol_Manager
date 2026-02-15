@@ -2452,8 +2452,9 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_val
 # Table Headers with Sort IDs
         cols = [
             ("ID", "bottle_id"), 
-            ("Name", "bottle_name"), 
             ("Distillery", "distillery"),
+            ("Bottle Name", "bottle_name"), 
+
             ("Sweetness Level", "sweetness_level"), 
 
             ("Richness Level", "richness_level"), 
