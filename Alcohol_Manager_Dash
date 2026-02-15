@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 import os
 import random
 import json
+import time
 
 # --- Configuration ---
 SERVICE_ACCOUNT_FILE = r"C:\Users\iroyp\OneDrive\שולחן העבודה\TELEGRAM\Telegram-Autoforwarder-master\hopeful-flash-478009-b7-1acfbd3ccca6.json"
@@ -72,7 +73,26 @@ alc_scan_style = {
 }
 
 
+# Lightweight TTL cache (in-memory)
+# -----------------------------
+_DROPDOWN_CACHE = {"ts": 0, "data": None}
+_DROPDOWN_TTL_SEC = 15 * 60  # 15 minutes
 
+def fetch_all_dropdown_data_cached(force_refresh: bool = False):
+    """
+    Cached wrapper for fetch_all_dropdown_data().
+    Prevents re-querying BigQuery on every bottle selection.
+    """
+    now = time.time()
+    if (not force_refresh
+        and _DROPDOWN_CACHE["data"] is not None
+        and (now - _DROPDOWN_CACHE["ts"]) < _DROPDOWN_TTL_SEC):
+        return _DROPDOWN_CACHE["data"]
+
+    data = fetch_all_dropdown_data()  # your existing function
+    _DROPDOWN_CACHE["data"] = data or {}
+    _DROPDOWN_CACHE["ts"] = now
+    return _DROPDOWN_CACHE["data"]
     
 # Open and read API Key
 try:
@@ -1426,89 +1446,108 @@ def poll_scan_status(n, session_id, cask_opts, nose_opts,
         
     return no_update
 
-# 1. FETCH BOTTLE DATA (Simple, Clean, Works)
+# 1. FETCH BOTTLE DATA (FAST: single query + cached dropdowns)
 @app.callback(
-    [Output('bottle-meta-store', 'data'),
-     Output('upd-nose', 'options'),
-     Output('upd-nose', 'value'),
-     Output('upd-palette', 'options'),
-     Output('upd-palette', 'value'),
-     Output('upd-abv', 'value'),
-     Output('bottle-info-badges', 'children')],
+    [
+        Output('bottle-meta-store', 'data'),
+        Output('upd-nose', 'options'),
+        Output('upd-nose', 'value'),
+        Output('upd-palette', 'options'),
+        Output('upd-palette', 'value'),
+        Output('upd-abv', 'value'),
+        Output('bottle-info-badges', 'children')
+    ],
     Input('update-selector', 'value')
 )
 def load_bottle_data(bottle_id):
     if not bottle_id or not client:
         return None, [], [], [], [], None, []
-    
+
     try:
-        # Get main table data
-        q_main = f"""
-        SELECT bottle_name, orignal_volume, alcohol_percentage, stock_status_per
-        FROM `{TABLE_REF}`
-        WHERE bottle_id = {bottle_id}
-        """
-        main = list(client.query(q_main).result())[0]
-        
-        # Get LATEST history data (this is THE source of truth for flavor evolution)
-        q_history = f"""
-        SELECT nose, palette, alc_pre
-        FROM `{HISTORY_TABLE_REF}`
-        WHERE bottle_id = {bottle_id}
-        ORDER BY update_time DESC
+        bid = int(bottle_id)
+
+        # --- Single query: main + latest history in one shot ---
+        query = f"""
+        WITH latest_hist AS (
+          SELECT
+            bottle_id,
+            nose     AS h_nose,
+            palette  AS h_palette,
+            alc_pre  AS h_abv
+          FROM `{HISTORY_TABLE_REF}`
+          WHERE bottle_id = @bid
+          QUALIFY ROW_NUMBER() OVER (PARTITION BY bottle_id ORDER BY update_time DESC) = 1
+        )
+        SELECT
+          t.bottle_id,
+          t.bottle_name,
+          t.orignal_volume,
+          t.alcohol_percentage AS orig_abv,
+          t.stock_status_per,
+          COALESCE(l.h_nose, t.nose)       AS nose,
+          COALESCE(l.h_palette, t.palette) AS palette,
+          COALESCE(l.h_abv, t.alcohol_percentage) AS abv
+        FROM `{TABLE_REF}` t
+        LEFT JOIN latest_hist l
+        USING (bottle_id)
+        WHERE t.bottle_id = @bid
         LIMIT 1
         """
-        history = list(client.query(q_history).result())
-        
-        # Decide which data to use
-        if history and history[0].nose is not None:
-            # USE HISTORY
-            nose_values = list(history[0].nose)
-            palette_values = list(history[0].palette) if history[0].palette else []
-            abv_value = float(history[0].alc_pre) if history[0].alc_pre else float(main.alcohol_percentage)
-        else:
-            # USE MAIN TABLE (first time)
-            q_initial = f"""
-            SELECT nose, palette
-            FROM `{TABLE_REF}`
-            WHERE bottle_id = {bottle_id}
-            """
-            initial = list(client.query(q_initial).result())[0]
-            nose_values = list(initial.nose) if initial.nose else []
-            palette_values = list(initial.palette) if initial.palette else []
-            abv_value = float(main.alcohol_percentage)
-        
-        # Build dropdown options (include current values + all known values)
-        all_opts = fetch_all_dropdown_data()
-        
-        nose_opts = all_opts.get('nose', [])
+
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("bid", "INT64", bid)],
+            use_query_cache=True
+        )
+
+        rows = list(client.query(query, job_config=job_config).result())
+        if not rows:
+            return None, [], [], [], [], None, []
+
+        r = rows[0]
+
+        # Values from DB (already resolved to history/main)
+        nose_values = list(r.nose) if r.nose else []
+        palette_values = list(r.palette) if r.palette else []
+        abv_value = float(r.abv) if r.abv is not None else float(r.orig_abv)
+
+        # Dropdown options (cached)
+        all_opts = fetch_all_dropdown_data_cached()
+        nose_opts = list(all_opts.get('nose', []))
+        palette_opts = list(all_opts.get('palette', []))
+
+        # Ensure current values appear in options
+        existing_nose_vals = {o.get("value") for o in nose_opts}
         for nv in nose_values:
-            if not any(o['value'] == nv for o in nose_opts):
-                nose_opts.insert(0, {'label': nv, 'value': nv})
-        
-        palette_opts = all_opts.get('palette', [])
+            if nv not in existing_nose_vals:
+                nose_opts.insert(0, {"label": nv, "value": nv})
+                existing_nose_vals.add(nv)
+
+        existing_pal_vals = {o.get("value") for o in palette_opts}
         for pv in palette_values:
-            if not any(o['value'] == pv for o in palette_opts):
-                palette_opts.insert(0, {'label': pv, 'value': pv})
-        
-        # Store metadata
+            if pv not in existing_pal_vals:
+                palette_opts.insert(0, {"label": pv, "value": pv})
+                existing_pal_vals.add(pv)
+
+        vol = int(r.orignal_volume) if r.orignal_volume else 700
+        stock = float(r.stock_status_per) if r.stock_status_per is not None else 100.0
+        orig_abv = float(r.orig_abv) if r.orig_abv is not None else abv_value
+
         meta = {
-            'bid': bottle_id,
-            'name': main.bottle_name,
-            'vol': main.orignal_volume or 700,
-            'stock': float(main.stock_status_per),
-            'orig_abv': float(main.alcohol_percentage)
+            "bid": bid,
+            "name": r.bottle_name,
+            "vol": vol,
+            "stock": stock,
+            "orig_abv": orig_abv
         }
-        
-        # Info badges
-        current_ml = int(meta['vol'] * (meta['stock'] / 100))
+
+        current_ml = int(meta["vol"] * (meta["stock"] / 100.0))
         badges = [
             dbc.Badge(f"Total: {meta['vol']}ml", color="dark", className="mr-2"),
             dbc.Badge(f"Current: {current_ml}ml", color="info")
         ]
-        
+
         return meta, nose_opts, nose_values, palette_opts, palette_values, abv_value, badges
-        
+
     except Exception as e:
         print(f"Load Error: {e}")
         import traceback
