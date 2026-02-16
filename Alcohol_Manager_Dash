@@ -2527,11 +2527,7 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_val
             "textAlign": "center"
         }
         
-    
-
-    if not rows:
-        return dbc.Alert("No results", color="warning"), "0", 0, "Page 1", True, True
-    
+   
     # ---------------------------
     # התיקון הקריטי כאן:
     # ---------------------------
@@ -2582,6 +2578,46 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_val
             [dbc.Badge(x, color="secondary", pill=True, className="me-1 mb-1") for x in items],
             style={"display": "flex", "flexWrap": "wrap", "gap": "6px"}
         )
+        
+    def get_date_style(date_str):
+            if not date_str or date_str == "-":
+                return {'className': 'small text-muted'}
+            
+            try:
+                target = datetime.strptime(str(date_str), '%Y-%m-%d').date()
+                today = datetime.now().date()
+                diff = (target - today).days
+                
+                # סגנון בסיסי - שים לב לשימוש ב-rgba לשקיפות 50% (0.5)
+                style = {
+                    'textAlign': 'center', 
+                    'fontWeight': 'bold', 
+                    'borderRadius': '6px',
+                    'padding': '4px'
+                }
+                
+                # 1. עבר לפני יותר מ-3 חודשים (<-90) -> אדום עמוק + לבן
+                if diff < -90:
+                    style.update({'backgroundColor': 'rgba(139, 0, 0, 0.5)', 'color': 'white'}) # Deep Red
+                
+                # 2. עבר לפני פחות מ-3 חודשים (-90 עד 0) -> אדום בהיר + שחור
+                elif -90 <= diff < 0:
+                    style.update({'backgroundColor': 'rgba(255, 99, 71, 0.5)', 'color': 'black'}) # Tomato / Light Red
+                
+                # 3. עתיד קרוב (0 עד 120 יום - 4 חודשים) -> כתום-צהוב + שחור
+                elif 0 <= diff < 120:
+                    style.update({'backgroundColor': 'rgba(255, 193, 7, 0.5)', 'color': 'black'}) # Amber
+                    
+                # 4. עתיד רחוק (> 4 חודשים) -> ירוק + שחור
+                else:
+                    style.update({'backgroundColor': 'rgba(144, 238, 144, 0.5)', 'color': 'black'}) # Light Green
+                    
+                return style
+            except:
+                return {'className': 'small text-muted'}    
+
+    if not rows:
+        return dbc.Alert("No results", color="warning"), "0", 0, "Page 1", True, True
 
     body = []
     for r in rows:
@@ -2626,6 +2662,10 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_val
             style={"backgroundColor": "#f8f9fa", "borderRadius": "14px"}
         )
 
+# חישוב הסטייל לתאריך
+        bb_val = str(r.get('Best_Before', '-'))
+        bb_style = get_date_style(bb_val)
+        
         # --- Main row ---
         body.append(html.Tr([
             html.Td(r['bottle_id']),
@@ -2648,7 +2688,8 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_val
             html.Td(r['age'] if r['age'] else "-"),
             html.Td(f"{int(r['price'])}₪" if r['price'] else "-"),
             html.Td(str(r.get('predicted_finish_date', '-')), className="small text-muted"),
-            html.Td(str(r.get('Best_Before', '-')), className="small text-muted"),
+            # כאן השינוי: שימוש ב-bb_style החדש
+                        html.Td(bb_val, style=bb_style),
             html.Td(progress_bar(r['stock_status_per']), style={'width': '140px'}),
 
             # NEW: chevron cell
