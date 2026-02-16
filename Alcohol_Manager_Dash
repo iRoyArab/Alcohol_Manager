@@ -2421,7 +2421,7 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_val
 
             (6.9, "#a9a9a9"),  # dark gray (ash - bbq smoke end)
 
-            (7.9, "#444444"),  # near black (heavy peat end)
+            (10.9, "#444444"),  # near black (heavy peat end)
         ]
 
         if score is None:
@@ -2513,7 +2513,7 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_val
                 (12.8, "#7a3f15"),  # Very Rich
 
                 (18.2, "#4a2a12"),  # Syrup Like start
-                (20.6, "#2b160a"),  # Syrup Like end
+                (35.6, "#2b160a"),  # Syrup Like end
             ]
             bg = _lerp_color_by_stops_rich(s, STOPS)
 
