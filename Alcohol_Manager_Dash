@@ -253,7 +253,7 @@ def get_all_data_as_df():
     query = f"""
     SELECT t1.*, 
            t2.final_smoky_sweet_score, t2.final_richness_score,
-           t3.predicted_finish_date, t3.Best_Before
+           t3.avg_consumption_vol_per_day,t3.predicted_finish_date, t3.Best_Before
     FROM `{TABLE_REF}` t1
     LEFT JOIN `{VIEW_REF}` t2 ON t1.bottle_name = t2.bottle_name AND t1.distillery = t2.distillery
     LEFT JOIN `{FORECAST_TABLE_REF}` t3 ON t1.bottle_id = t3.bottle_id
@@ -2291,6 +2291,7 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_val
         'alcohol_type': 'alcohol_type',
         'sweetness_level': 'final_smoky_sweet_score',
         'richness_level': 'final_richness_score',
+        'avg_consumption_vol_per_day': 'avg_consumption_vol_per_day',
         'predicted_finish_date': 'predicted_finish_date',
         'Best_Before': 'Best_Before'
     }
@@ -2547,6 +2548,7 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_val
                 ("ABV", "alcohol_percentage"),
                 ("Age", "age"), 
                 ("Price", "price"), 
+                ("Popularity", "avg_consumption_vol_per_day"),
                 ("Est Depletion", "predicted_finish_date"), # New
                 ("Best Before", "Best_Before"),             # New
                 ("Stock", "stock_status_per"),
@@ -2687,7 +2689,8 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_val
             html.Td(f"{r['alcohol_percentage']}%"),
             html.Td(r['age'] if r['age'] else "-"),
             html.Td(f"{int(r['price'])}₪" if r['price'] else "-"),
-            html.Td(str(r.get('predicted_finish_date', '-')), className="small text-muted"),
+            html.Td(f"{round(r['avg_consumption_vol_per_day'],4)} ml",style={'fontWeight': 'bold'}),
+            html.Td(str(r.get('predicted_finish_date', '-')),style={'fontWeight': 'bold'}, className="regular text-muted"),
             # כאן השינוי: שימוש ב-bb_style החדש
                         html.Td(bb_val, style=bb_style),
             html.Td(progress_bar(r['stock_status_per']), style={'width': '140px'}),
