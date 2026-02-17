@@ -370,6 +370,7 @@ app.layout = dbc.Container([
                     create_dynamic_input('new-alcohol_type', "Alcohol Type"),
                     create_dynamic_input('new-origin_country', "Country"),
                     create_dynamic_input('new-region', "Region"),
+
                 ], className="mb-3"),
                 
                 html.Hr(),
@@ -597,9 +598,25 @@ app.layout = dbc.Container([
 
                 # --- General Filters ---
                 dbc.Row([
-                    dbc.Col([dbc.Label("🌍 Country"), dcc.Dropdown(id='search-country', options=INITIAL_OPTIONS.get('origin_country', []), placeholder="All")], width=3),
-                    dbc.Col([dbc.Label("🏭 Distillery"), dcc.Dropdown(id='search-distillery', options=INITIAL_OPTIONS.get('distillery', []), placeholder="All")], width=3),
-                    dbc.Col([dbc.Label("🥃 Type"), dcc.Dropdown(id='search-alcohol-type', options=INITIAL_OPTIONS.get('alcohol_type', []), placeholder="Type")], width=3),
+                    dbc.Col([dbc.Label("🌍 Country"), dcc.Dropdown(id='search-country', options=INITIAL_OPTIONS.get('origin_country', []), placeholder="All")], width=2),
+                    dbc.Col([dbc.Label("🏭 Distillery"), dcc.Dropdown(id='search-distillery', options=INITIAL_OPTIONS.get('distillery', []), placeholder="All")], width=2),
+                    dbc.Col([dbc.Label("🥃 Type"), dcc.Dropdown(id='search-alcohol-type', options=INITIAL_OPTIONS.get('alcohol_type', []), placeholder="Type")], width=2),
+                    dbc.Col([
+    dbc.Label("🔔 Best Before Status"), 
+    dcc.Dropdown(
+        id='search_best_before', 
+        placeholder="Select Freshness...",
+        multi=True,
+        options=[
+            {'label': "💀 Passed it's Prime (> 90 days ago)", 'value': 'passed_prime'},
+            {'label': "📉 Started to Lose Flavors (< 90 days ago)", 'value': 'losing_flavors'},
+            {'label': "⚠️ About to Lose Flavors (Next 120 days)", 'value': 'about_to_lose'},
+            {'label': "✅ Safe Zone (> 120 days)", 'value': 'safe_zone'}
+        ],
+        clearable=True
+    )
+], width=3), # שיניתי ל-width=3 כדי שיהיה מקום לטקסט
+                    
                 ], className="mb-3"),
 
                 html.Hr(),
@@ -2176,6 +2193,7 @@ def toggle_search_mode(mode):
      State('search-country', 'value'),
      State('search-distillery', 'value'),
      State('search-alcohol-type', 'value'),
+     State('search_best_before', 'value'),
      State('search-abv-min', 'value'),
      State('search-abv-max', 'value'),
      State('search-age-min', 'value'),
@@ -2186,7 +2204,7 @@ def toggle_search_mode(mode):
     prevent_initial_call=True
 )
 def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_vals, casks, noses, palettes, country, dist, alc_type, 
-                   abv_min, abv_max, age_min, age_max, stock_min, stock_max, page):
+                   bb_filter,abv_min, abv_max, age_min, age_max, stock_min, stock_max, page):
     
     # 1. טעינת הנתונים מהזיכרון (מהיר מאוד!)
     df = get_all_data_as_df()
@@ -2222,6 +2240,38 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_val
         temp_df = temp_df[temp_df['origin_country'] == country]
     if dist:
         temp_df = temp_df[temp_df['distillery'] == dist]
+        
+# === Best Before Logic (New) ===
+    if bb_filter and len(bb_filter) > 0:
+            # 1. חישוב ימים (כמו קודם)
+            temp_df['Best_Before_DT'] = pd.to_datetime(temp_df['Best_Before'], errors='coerce')
+            today = pd.Timestamp.now().normalize()
+            temp_df['days_diff'] = (temp_df['Best_Before_DT'] - today).dt.days
+
+            # 2. יצירת מסכה ריקה (הכל False בהתחלה)
+            # אנחנו משתמשים ב-index של temp_df כדי להבטיח התאמה לשורות
+            combined_mask = pd.Series([False] * len(temp_df), index=temp_df.index)
+
+            # 3. מעבר על כל בחירה והוספה ל-Combined Mask
+            if 'passed_prime' in bb_filter:
+                # מוסיפים את מי שעבר זמנו ב-90 יום ומעלה
+                combined_mask |= (temp_df['days_diff'] < -90)
+                
+            if 'losing_flavors' in bb_filter:
+                # מוסיפים את מי שעבר זמנו בפחות מ-90 יום
+                combined_mask |= ((temp_df['days_diff'] >= -90) & (temp_df['days_diff'] < 0))
+                
+            if 'about_to_lose' in bb_filter:
+                # מוסיפים את מי שעתיד לפוג ב-120 יום הקרובים
+                combined_mask |= ((temp_df['days_diff'] >= 0) & (temp_df['days_diff'] < 120))
+                
+            if 'safe_zone' in bb_filter:
+                # מוסיפים את מי שבטוח לשתייה
+                combined_mask |= (temp_df['days_diff'] >= 120)
+
+            # 4. החלת הסינון הסופי
+            temp_df = temp_df[combined_mask]
+                
     if alc_type:
         temp_df = temp_df[temp_df['alcohol_type'] == alc_type]
 
