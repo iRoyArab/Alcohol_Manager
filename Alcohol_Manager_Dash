@@ -10,6 +10,70 @@ import pandas as pd
 import random
 import json
 import time
+import json
+import re
+from dash import no_update, ctx
+from dash.dependencies import Input, Output, State
+
+# --- Premium UI CSS (auto-write to assets) ---
+try:
+    _assets_dir = os.path.join(os.path.dirname(__file__), "assets")
+    os.makedirs(_assets_dir, exist_ok=True)
+    _css_path = os.path.join(_assets_dir, "premium_tiles.css")
+    if not os.path.exists(_css_path):
+        with open(_css_path, "w", encoding="utf-8") as f:
+            f.write("""/* Premium tiles (Search tab) */
+.premium-results .btn-group { flex-wrap: wrap; gap: 6px; }
+.premium-tile {
+  border-radius: 16px !important;
+  overflow: hidden;
+  border: 1px solid rgba(0,0,0,0.06);
+  box-shadow: 0 6px 18px rgba(0,0,0,0.08);
+  transition: transform .18s ease, box-shadow .18s ease;
+  height: 100%;
+}
+.premium-tile:hover{
+  transform: translateY(-4px);
+  box-shadow: 0 14px 28px rgba(0,0,0,0.14);
+}
+.premium-tile-cover{
+  padding: 12px 14px;
+  background: linear-gradient(135deg, rgba(0,0,0,0.85), rgba(0,0,0,0.25));
+  color: #fff;
+}
+.premium-tile-title{
+  font-weight: 800;
+  font-size: 16px;
+  line-height: 1.2;
+  margin: 0;
+}
+.premium-tile-subtitle{
+  opacity: .85;
+  font-size: 13px;
+  margin-top: 4px;
+}
+.premium-stat{
+  font-size: 12px;
+  color: rgba(0,0,0,0.65);
+}
+.premium-stat strong{
+  display:block;
+  font-size: 14px;
+  color: rgba(0,0,0,0.92);
+}
+.premium-chip{
+  display:inline-block;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid rgba(0,0,0,0.10);
+  margin-right: 6px;
+  margin-bottom: 6px;
+  background: rgba(0,0,0,0.03);
+}
+""")
+except Exception:
+    pass
 
 # --- Configuration ---
 SERVICE_ACCOUNT_FILE = r"C:\Users\iroyp\OneDrive\שולחן העבודה\TELEGRAM\Telegram-Autoforwarder-master\hopeful-flash-478009-b7-1acfbd3ccca6.json"
@@ -253,7 +317,9 @@ def get_all_data_as_df():
     query = f"""
     SELECT t1.*, 
            t2.final_smoky_sweet_score, t2.final_richness_score,
-           t3.avg_consumption_vol_per_day,t3.predicted_finish_date, t3.Best_Before
+           t3.avg_consumption_vol_per_day,
+           t3.est_consumption_date,
+           t3.predicted_finish_date, t3.Best_Before
     FROM `{TABLE_REF}` t1
     LEFT JOIN `{VIEW_REF}` t2 ON t1.bottle_name = t2.bottle_name AND t1.distillery = t2.distillery
     LEFT JOIN `{FORECAST_TABLE_REF}` t3 ON t1.bottle_id = t3.bottle_id
@@ -272,11 +338,43 @@ def get_all_data_as_df():
     CACHE_DATA["last_update"] = time.time()
     return df
 
+
+# Cache for history table (update tab usage)
+CACHE_HISTORY = {"df": None, "last_update": 0}
+
+def get_history_as_df():
+    """Fetch history table as a DataFrame, cached for 5 minutes."""
+    if CACHE_HISTORY["df"] is not None and (time.time() - CACHE_HISTORY["last_update"] < 300):
+        return CACHE_HISTORY["df"]
+    if not client:
+        return pd.DataFrame()
+
+    query = f"""
+    SELECT bottle_id, update_time, stock_status_per, nose, palette, alc_pre, drams_counter
+    FROM `{HISTORY_TABLE_REF}`
+    """
+
+    dfh = client.query(query).to_dataframe()
+
+    # Normalize array columns to python lists
+    import numpy as np
+    for col in ['nose', 'palette']:
+        if col in dfh.columns:
+            dfh[col] = dfh[col].apply(lambda x: list(x) if isinstance(x, np.ndarray) else ([] if x is None else x))
+
+    CACHE_HISTORY["df"] = dfh
+    CACHE_HISTORY["last_update"] = time.time()
+    return dfh
+
+
+
+
 # --- Layout ---
 app.layout = dbc.Container([
     dcc.Store(id='bottle-meta-store'),
     dcc.Store(id='details-open-store', data=None),
     dcc.Store(id='sort-state', data={'col': 'bottle_id', 'dir': 'DESC'}),
+    dcc.Store(id='last-new-distillery', data=None),
 # === הוסף את החלק הזה ===
     dcc.Interval(id='scan-interval', interval=2000, n_intervals=0, disabled=True),
     dcc.Store(id='scan-session-store'),
@@ -425,7 +523,18 @@ app.layout = dbc.Container([
                     dbc.Col([
                         html.H4("Select Bottle", className="mb-3"),
                         dcc.Dropdown(id='update-selector', options=INITIAL_BOTTLE_LIST, placeholder="Search bottle..."),
-                        
+                        dcc.Store(id="next-consumption-bottleid-store"),
+
+                        html.Div(id="next-consumption-status", className="mb-2"),
+
+                        dbc.Button(
+                            "Select this bottle",
+                            id="btn-select-next-consumption",
+                            color="primary",
+                            outline=True,
+                            className="w-100 mb-3",
+                            disabled=True,   # יופעל רק כשיש המלצה
+                        ),
                         html.Hr(),
                         
                         # Random Dram Generator
@@ -483,36 +592,130 @@ app.layout = dbc.Container([
                     dbc.Col([
                         html.H4("Bottle Level", className="text-center mb-4"),
                         dbc.Row([
-                            dbc.Col([
-                                dcc.Slider(
-                                    id='stock-slider', 
-                                    min=0, max=100, step=0.1, value=100, 
-                                    vertical=True, verticalHeight=400,
-                                    marks={0: 'Empty', 25: '25%', 50: '50%', 75: '75%', 100: 'Full'}
-                                )
-                            ], width=2, className="d-flex justify-content-center"),
+                        dbc.Col([
+                            dcc.Slider(
+                                id='stock-slider',
+                                min=0, max=100, step=0.1, value=100,
+                                vertical=True, verticalHeight=340,
+                                marks={0: 'Empty', 25: '25%', 50: '50%', 75: '75%', 100: 'Full'}
+                            )
+                        ],
+                        width=2,
+                        className="d-flex justify-content-center",
+                        style={"marginTop": "60px"}  # <- הזזה למטה
+                        ),
                             dbc.Col([
                                 html.Div(
+                                    id='bottle-visual',
                                     style={
-                                        'width': '120px', 
-                                        'height': '400px', 
-                                        'border': '4px solid #333', 
-                                        'borderRadius': '10px 10px 5px 5px', 
-                                        'position': 'relative', 
-                                        'backgroundColor': '#f8f9fa', 
+                                        'width': '240px',
+                                        'height': '420px',
+                                        'position': 'relative',
                                         'margin': '0 auto'
-                                    }, 
+                                    },
                                     children=[
+                                        # Cap
                                         html.Div(
-                                            id='liquid-fill', 
                                             style={
-                                                'width': '100%', 
-                                                'backgroundColor': '#d35400', 
-                                                'position': 'absolute', 
-                                                'bottom': '0', 
-                                                'transition': 'height 0.3s ease', 
-                                                'height': '100%'
+                                                'position': 'absolute',
+                                                'top': '0px',
+                                                'left': '50%',
+                                                'transform': 'translateX(-50%)',
+                                                'width': '78px',
+                                                'height': '34px',
+                                                'borderRadius': '14px',
+                                                'border': '2px solid rgba(0,0,0,0.55)',
+                                                'background': 'rgba(0,0,0,0.12)',
+                                                'boxShadow': '0 6px 14px rgba(0,0,0,0.18)'
                                             }
+                                        ),
+                                        # Neck
+                                        html.Div(
+                                            style={
+                                                'position': 'absolute',
+                                                'top': '28px',
+                                                'left': '50%',
+                                                'transform': 'translateX(-50%)',
+                                                'width': '92px',
+                                                'height': '60px',
+                                                'borderRadius': '22px',
+                                                'border': '3px solid rgba(0,0,0,0.55)',
+                                                'background': 'rgba(255,255,255,0.28)',
+                                                'backdropFilter': 'blur(2px)',
+                                                'overflow': 'hidden'
+                                            },
+                                            children=[
+                                                html.Div(
+                                                    id='neck-liquid-fill',
+                                                    style={
+                                                        'width': '100%',
+                                                        'position': 'absolute',
+                                                        'bottom': '0',
+                                                        'left': '0',
+                                                        'right': '0',
+                                                        'transition': 'height 0.3s ease',
+                                                        'height': '0%',
+                                                        'backgroundImage': 'linear-gradient(180deg, rgba(214,126,0,0.98), rgba(146,63,0,0.98))'
+                                                    }
+                                                ),
+                                                html.Div(
+                                                    style={
+                                                        'position': 'absolute',
+                                                        'inset': '0',
+                                                        'backgroundImage': 'linear-gradient(115deg, rgba(255,255,255,0.35) 0%, rgba(255,255,255,0.08) 45%, rgba(255,255,255,0.0) 75%)',
+                                                        'pointerEvents': 'none'
+                                                    }
+                                                )
+                                            ]
+                                        ),
+                                        # Main bottle glass
+                                        html.Div(
+                                            style={
+                                                'position': 'absolute',
+                                                'top': '70px',
+                                                'left': '50%',
+                                                'transform': 'translateX(-50%)',
+                                                'width': '180px',
+                                                'height': '340px',
+                                                'borderRadius': '52px 52px 34px 34px',
+                                                'border': '4px solid rgba(0,0,0,0.55)',
+                                                'background': 'rgba(255,255,255,0.22)',
+                                                'boxShadow': '0 14px 28px rgba(0,0,0,0.18)',
+                                                'overflow': 'hidden'
+                                            },
+                                            children=[
+                                                # Liquid
+                                                html.Div(
+                                                    id='liquid-fill',
+                                                    style={
+                                                        'width': '100%',
+                                                        'position': 'absolute',
+                                                        'bottom': '0',
+                                                        'transition': 'height 0.35s ease',
+                                                        'height': '100%',
+                                                        'backgroundImage': 'linear-gradient(180deg, rgba(214,126,0,0.98), rgba(146,63,0,0.98))'
+                                                    }
+                                                ),
+                                                # Glass highlight
+                                                html.Div(
+                                                    style={
+                                                        'position': 'absolute',
+                                                        'inset': '0',
+                                                        'backgroundImage': 'linear-gradient(115deg, rgba(255,255,255,0.40) 0%, rgba(255,255,255,0.10) 40%, rgba(255,255,255,0.0) 70%)',
+                                                        'pointerEvents': 'none'
+                                                    }
+                                                ),
+                                                # Inner rim (subtle)
+                                                html.Div(
+                                                    style={
+                                                        'position': 'absolute',
+                                                        'inset': '10px',
+                                                        'borderRadius': '44px 44px 26px 26px',
+                                                        'border': '1px solid rgba(0,0,0,0.12)',
+                                                        'pointerEvents': 'none'
+                                                    }
+                                                )
+                                            ]
                                         )
                                     ]
                                 )
@@ -658,6 +861,21 @@ app.layout = dbc.Container([
                 dbc.Button("Run Search", id='btn-run-search', color="primary", size="lg", className="w-100 mb-4"),
 
                 html.Hr(),
+                html.Div([
+                    dbc.Label("View Mode:", className="me-2 fw-bold"),
+                    dbc.RadioItems(
+                        id='view-mode-toggle',
+                        options=[
+                            {'label': '📋 Table', 'value': 'table'},
+                            {'label': '🧩 Tiles', 'value': 'tiles'}
+                        ],
+                        value='tiles',
+                        inline=True,
+                        inputClassName="btn-check",
+                        labelClassName="btn btn-outline-secondary",
+                        labelCheckedClassName="active"
+                    )
+                ], className="mb-2"),
                 html.Div([html.H5("Search Results:", className="d-inline-block mr-3"), dbc.Badge("0 Records", id='search-count-badge', color="info", className="p-2", style={'fontSize': '1em'})], className="mb-3"),
                 dcc.Loading(html.Div(id='search-results-area')),
                 html.Div([
@@ -806,68 +1024,72 @@ def mobile_upload(session_id):
 # CALLBACKS - UPDATE TAB (CLEAN REWRITE)
 # ============================================================================
 
-#0.25. Auto Bottle Fill
+# 0.25 Auto Bottle Fill (FIXED: no accumulation, clears invalid value on distillery change)
 @app.callback(
-    Output('new-bottle_name-dropdown', 'options', allow_duplicate=True),
+    [
+        Output('new-bottle_name-dropdown', 'options', allow_duplicate=True),
+        Output('new-bottle_name-dropdown', 'value', allow_duplicate=True),
+        Output('new-bottle_name-input', 'value', allow_duplicate=True),
+        Output('last-new-distillery', 'data', allow_duplicate=True),
+    ],
     Input('new-distillery-dropdown', 'value'),
-    State('new-bottle_name-dropdown', 'value'), # <--- הוספנו את זה: שומר על הערך הקיים
+    State('new-bottle_name-dropdown', 'value'),
+    State('new-bottle_name-input', 'value'),
+    State('last-new-distillery', 'data'),
     prevent_initial_call=True
 )
-def auto_fill_bottle(distillery, current_bottle_val):
-    # אם אין מזקקה, מנקים (אלא אם יש ערך קיים שצריך לשמור)
+def auto_fill_bottle_fixed(distillery, current_bottle_val, current_manual_val, last_distillery):
     if not distillery:
-        return []
+        return [], None, "", distillery
 
-    if not client:
-        return []
+    df = get_all_data_as_df()
+    if df is None or df.empty:
+        return [], None, "", distillery
 
-    # 1. שליפת הרשימה מה-DB כרגיל
-    query = f"""
-        SELECT DISTINCT bottle_name
-        FROM `{TABLE_REF}`
-        WHERE distillery = @distillery
-        ORDER BY bottle_name
-    """
+    sub = df[df["distillery"] == distillery]
 
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("distillery", "STRING", distillery)
-        ]
+    bottle_names = (
+        sub["bottle_name"]
+        .dropna()
+        .astype(str)
+        .sort_values()
+        .unique()
+        .tolist()
     )
 
-    try:
-        rows = client.query(query, job_config=job_config).result()
-        
-        # בניית הרשימה מה-DB
-        options = [
-            {"label": row.bottle_name, "value": row.bottle_name}
-            for row in rows
-        ]
-        
-        # === התיקון: שימור הערך שהגיע מהסריקה ===
-        # אנחנו בודקים אם יש ערך נוכחי בשדה השם, ואם הוא לא ברשימה - מוסיפים אותו ידנית
-        if current_bottle_val and current_bottle_val != 'ADD_NEW_OPTION':
-            # בדיקה אם הערך כבר קיים ברשימה כדי למנוע כפילויות
-            exists = any(o['value'] == current_bottle_val for o in options)
-            if not exists:
-                # מוסיפים את השם שנסרק לראש הרשימה
-                options.insert(0, {"label": current_bottle_val, "value": current_bottle_val})
+    options = [{"label": b, "value": b} for b in bottle_names]
+    options.append({"label": "➕ Add New Bottle...", "value": "ADD_NEW_OPTION"})
 
-        # הוספת אופציית "הוסף חדש" בסוף
-        options.append({
-            "label": "➕ Add New Bottle...",
-            "value": "ADD_NEW_OPTION"
-        })
+    distillery_changed = (last_distillery is not None and distillery != last_distillery)
 
-        return options
+    # Decide what the dropdown value should be now
+    if current_bottle_val == "ADD_NEW_OPTION":
+        # Keep Add-New selection, but if distillery changed we still want to clear the manual text
+        new_value = "ADD_NEW_OPTION"
+        new_manual = "" if distillery_changed else (current_manual_val or "")
+        return options, new_value, new_manual, distillery
 
-    except Exception as e:
-        print("Bottle Query Error:", e)
-        return []
-import json
-import re
-from dash import no_update, ctx
-from dash.dependencies import Input, Output, State
+    # If distillery changed -> normally clear
+    if distillery_changed:
+        return options, None, "", distillery
+
+    # If we have a value but it's not in DF for this distillery:
+    # ✅ add it to options and keep it selected (supports AI / manual injected values)
+    if current_bottle_val and current_bottle_val not in bottle_names and current_bottle_val != "ADD_NEW_OPTION":
+        injected = str(current_bottle_val).strip()
+        if injected:
+            # add injected bottle to the dropdown options before the add-new option
+            options = [{"label": b, "value": b} for b in bottle_names]
+            options.append({"label": injected, "value": injected})
+            options.append({"label": "➕ Add New Bottle...", "value": "ADD_NEW_OPTION"})
+            return options, injected, (current_manual_val or ""), distillery
+
+    # Otherwise keep the current selection
+    return options, current_bottle_val, (current_manual_val or ""), distillery
+
+
+
+
 
 # -----------------------------
 # Helpers (keep near callbacks)
@@ -951,19 +1173,7 @@ def _merge_single_options(existing_options, new_value):
     base.append({"label": ADD_NEW_LABEL, "value": ADD_NEW_VALUE})
     return base, value_to_set
 
-# Reset bottle selection if it is currently "Add New..." and distillery changes
-@app.callback(
-    Output("new-bottle_name-dropdown", "value",allow_duplicate=True),
-    Output('new-bottle_name-input', 'value',allow_duplicate=True),
-    Input("new-distillery-dropdown", "value"),
-    State("new-bottle_name-dropdown", "value"),
-    prevent_initial_call=True
-)
-def reset_bottle_if_add_new_selected(distillery, bottle_value):
-    # only clear if the user had selected the Add-New sentinel
-    if bottle_value == ADD_NEW_VALUE:
-        return [],""  # (use [] here if the dropdown is multi=True)
-    return no_update
+
 
 # -----------------------------
 # 0.5 Auto-Fill AI-Gen Driven
@@ -1395,6 +1605,7 @@ def open_scan_modal(n):
      Output('new-distillery-dropdown', 'value', allow_duplicate=True),
     Output('new-limited', 'value', allow_duplicate=True),
     Output('new-special', 'value', allow_duplicate=True),
+    Output('last-new-distillery', 'data', allow_duplicate=True),
      
      ],
 
@@ -1493,6 +1704,7 @@ def poll_scan_status(n, session_id, cask_opts, nose_opts,
             ai_distillery ,
                 data.get("limited", False),
                 data.get("special", False),
+                ai_distillery
         )
         
     return no_update
@@ -1510,58 +1722,51 @@ def poll_scan_status(n, session_id, cask_opts, nose_opts,
     ],
     Input('update-selector', 'value')
 )
+
 def load_bottle_data(bottle_id):
-    if not bottle_id or not client:
+    # NOTE: Update tab must read from the cached DF (refreshes every 5 minutes)
+    if not bottle_id:
         return None, [], [], [], [], None, []
 
     try:
         bid = int(bottle_id)
 
-        # --- Single query: main + latest history in one shot ---
-        query = f"""
-        WITH latest_hist AS (
-          SELECT
-            bottle_id,
-            nose     AS h_nose,
-            palette  AS h_palette,
-            alc_pre  AS h_abv
-          FROM `{HISTORY_TABLE_REF}`
-          WHERE bottle_id = @bid
-          QUALIFY ROW_NUMBER() OVER (PARTITION BY bottle_id ORDER BY update_time DESC) = 1
-        )
-        SELECT
-          t.bottle_id,
-          t.bottle_name,
-          t.orignal_volume,
-          t.alcohol_percentage AS orig_abv,
-          t.stock_status_per,
-          COALESCE(l.h_nose, t.nose)       AS nose,
-          COALESCE(l.h_palette, t.palette) AS palette,
-          COALESCE(l.h_abv, t.alcohol_percentage) AS abv
-        FROM `{TABLE_REF}` t
-        LEFT JOIN latest_hist l
-        USING (bottle_id)
-        WHERE t.bottle_id = @bid
-        LIMIT 1
-        """
-
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ScalarQueryParameter("bid", "INT64", bid)],
-            use_query_cache=True
-        )
-
-        rows = list(client.query(query, job_config=job_config).result())
-        if not rows:
+        df = get_all_data_as_df()
+        if df is None or df.empty or 'bottle_id' not in df.columns:
             return None, [], [], [], [], None, []
 
-        r = rows[0]
+        row = df[df["bottle_id"] == bid]
+        if row.empty:
+            return None, [], [], [], [], None, []
 
-        # Values from DB (already resolved to history/main)
-        nose_values = list(r.nose) if r.nose else []
-        palette_values = list(r.palette) if r.palette else []
-        abv_value = float(r.abv) if r.abv is not None else float(r.orig_abv)
+        r = row.iloc[0]
 
-        # Dropdown options (cached)
+        # Resolve latest history (cached) -> source of truth for flavor evolution
+        dfh = get_history_as_df()
+        latest = None
+        if dfh is not None and not dfh.empty:
+            h = dfh[dfh["bottle_id"] == bid]
+            if not h.empty:
+                # most recent by update_time
+                try:
+                    latest = h.sort_values("update_time", ascending=False).iloc[0]
+                except Exception:
+                    latest = h.iloc[0]
+
+        # Base values from main DF
+        base_nose = list(r.get("nose", [])) if r.get("nose", None) is not None else []
+        base_palette = list(r.get("palette", [])) if r.get("palette", None) is not None else []
+        base_abv = float(r.get("alcohol_percentage")) if r.get("alcohol_percentage", None) is not None else None
+        base_stock = float(r.get("stock_status_per")) if r.get("stock_status_per", None) is not None else 100.0
+
+        # Override from latest history if exists
+        nose_values = list(latest.get("nose", [])) if latest is not None and latest.get("nose", None) is not None else base_nose
+        palette_values = list(latest.get("palette", [])) if latest is not None and latest.get("palette", None) is not None else base_palette
+        abv_value = float(latest.get("alc_pre")) if latest is not None and latest.get("alc_pre", None) is not None else base_abv
+        if abv_value is None:
+            abv_value = base_abv if base_abv is not None else None
+
+        # Dropdown options (cached from initial)
         all_opts = fetch_all_dropdown_data_cached()
         nose_opts = list(all_opts.get('nose', []))
         palette_opts = list(all_opts.get('palette', []))
@@ -1579,16 +1784,22 @@ def load_bottle_data(bottle_id):
                 palette_opts.insert(0, {"label": pv, "value": pv})
                 existing_pal_vals.add(pv)
 
-        vol = int(r.orignal_volume) if r.orignal_volume else 700
-        stock = float(r.stock_status_per) if r.stock_status_per is not None else 100.0
-        orig_abv = float(r.orig_abv) if r.orig_abv is not None else abv_value
+        vol = int(r.get("orignal_volume")) if r.get("orignal_volume", None) else 700
+        orig_abv = float(r.get("alcohol_percentage")) if r.get("alcohol_percentage", None) is not None else (abv_value if abv_value is not None else 0.0)
+        name = str(r.get("bottle_name", f"#{bid}"))
 
         meta = {
             "bid": bid,
-            "name": r.bottle_name,
+            "name": name,
             "vol": vol,
-            "stock": stock,
-            "orig_abv": orig_abv
+            "stock": base_stock,
+            "orig_abv": orig_abv,
+
+            # originals for "no changes" validation (resolved to latest history if exists)
+            "orig_nose": list(nose_values),
+            "orig_palette": list(palette_values),
+            "orig_abv_resolved": float(abv_value) if abv_value is not None else orig_abv,
+            "orig_stock_resolved": float(base_stock)
         }
 
         current_ml = int(meta["vol"] * (meta["stock"] / 100.0))
@@ -1600,10 +1811,106 @@ def load_bottle_data(bottle_id):
         return meta, nose_opts, nose_values, palette_opts, palette_values, abv_value, badges
 
     except Exception as e:
-        print(f"Load Error: {e}")
+        print(f"Load Error (DF): {e}")
         import traceback
         traceback.print_exc()
         return None, [], [], [], [], None, []
+
+# 1.5 Estimated Bottle 
+@app.callback(
+    [
+        Output("next-consumption-status", "children"),
+        Output("next-consumption-bottleid-store", "data"),
+        Output("btn-select-next-consumption", "disabled"),
+    ],
+    Input("update-selector", "options"),
+)
+def render_next_consumption_status(_opts):
+    df = get_all_data_as_df()
+    if df is None or df.empty:
+        return dbc.Alert("No data loaded.", color="secondary", className="mb-0"), None, True
+
+    needed = {"bottle_id", "bottle_name", "distillery", "est_consumption_date"}
+    missing = needed - set(df.columns)
+    if missing:
+        return dbc.Alert(f"Missing columns: {', '.join(sorted(missing))}", color="warning", className="mb-0"), None, True
+
+    tmp = df.copy()
+    tmp["est_consumption_date"] = pd.to_datetime(tmp["est_consumption_date"], errors="coerce").dt.date
+    tmp = tmp.dropna(subset=["est_consumption_date"])
+
+    # אופציונלי: לא להמליץ על בקבוקים ריקים
+    if "current_status" in tmp.columns:
+        tmp = tmp[tmp["current_status"].fillna(0) > 0]
+
+    if tmp.empty:
+        return dbc.Alert("No upcoming est_consumption_date found.", color="secondary", className="mb-0"), None, True
+
+    idx = tmp["est_consumption_date"].idxmin()
+    r = tmp.loc[idx]
+
+    bid = int(r["bottle_id"])
+    bottle = str(r.get("bottle_name", "-"))
+    dist = str(r.get("distillery", "-"))
+    dt = r.get("est_consumption_date")
+
+    today = datetime.now().date()
+    days = (dt - today).days if dt else None
+
+    if days is None:
+        color, badge = "secondary", "Unknown"
+    elif days <= 0:
+        color, badge = "danger", "Due"
+    elif days <= 7:
+        color, badge = "warning", "Next 7 days"
+    elif days <= 30:
+        color, badge = "info", "Next 30 days"
+    else:
+        color, badge = "success", "Planned"
+
+    card = dbc.Card(
+        dbc.CardBody(
+            [
+                html.Div(
+                    [
+                        html.Span("🥃 Recommended bottle to consume soon", className="fw-bold"),
+                        dbc.Badge(badge, color=color, pill=True, className="ms-2"),
+                    ],
+                    className="d-flex align-items-center justify-content-between",
+                ),
+                html.H5(f"{dist} • {bottle}", className="mt-2 mb-1"),
+                html.Div(
+                    [
+                        html.Span("📅 ", className="text-muted"),
+                        html.Span(str(dt), className="fw-bold"),
+                        html.Span(f"  (in {days} days)" if days is not None and days >= 0 else "", className="text-muted"),
+                    ],
+                    className="text-muted",
+                ),
+            ]
+        ),
+        className="border-0",
+        style={
+            "borderRadius": "14px",
+            "boxShadow": "0 6px 18px rgba(0,0,0,0.08)",
+            "background": "linear-gradient(135deg, rgba(26,41,128,0.08), rgba(38,208,206,0.08))",
+        },
+    )
+
+    return card, bid, False
+
+# 1.75 Update Selector
+
+@app.callback(
+    Output("update-selector", "value", allow_duplicate=True),
+    Input("btn-select-next-consumption", "n_clicks"),
+    State("next-consumption-bottleid-store", "data"),
+    prevent_initial_call=True
+)
+def select_next_consumption_bottle(n, bid):
+    if not n or not bid:
+        return no_update
+    return bid
 
 
 # 2. TOGGLE EDIT MODE
@@ -1637,7 +1944,7 @@ def toggle_edit(n):
 )
 def update_visuals(slider_val, meta, n_pour, pour_ml, glasses):
     if not meta:
-        style = {'height': '0%', 'width': '100%', 'backgroundColor': '#d35400', 
+        style = {'height': '0%', 'width': '100%', 'backgroundImage': 'linear-gradient(180deg, rgba(214,126,0,0.98), rgba(146,63,0,0.98))', 
                  'position': 'absolute', 'bottom': '0', 'transition': 'height 0.3s ease'}
         return style, 100, "Select a bottle"
     
@@ -1664,7 +1971,7 @@ def update_visuals(slider_val, meta, n_pour, pour_ml, glasses):
     
     style = {
         'width': '100%',
-        'backgroundColor': '#d35400',
+        'backgroundImage': 'linear-gradient(180deg, rgba(214,126,0,0.98), rgba(146,63,0,0.98))',
         'position': 'absolute',
         'bottom': '0',
         'transition': 'height 0.3s ease',
@@ -1681,39 +1988,73 @@ def update_visuals(slider_val, meta, n_pour, pour_ml, glasses):
     Input('btn-random-dram', 'n_clicks'),
     prevent_initial_call=True
 )
+
 def random_dram(n):
-    if not client:
-        return "DB Error", no_update
-    
+    # NOTE: Must work from cached DF (no query per click)
+    if not n:
+        return no_update, no_update
+
+    df = get_all_data_as_df()
+    if df is None or df.empty:
+        return "No cached data yet.", no_update
+
     try:
-        query = f"""
-        WITH LastDrink AS (
-            SELECT bottle_id, MAX(update_time) as last_sip 
-            FROM `{HISTORY_TABLE_REF}`
-            GROUP BY bottle_id
-        )
-        SELECT t1.bottle_name, t1.bottle_id, t1.region, t1.distillery
-        FROM `{TABLE_REF}` t1
-        LEFT JOIN LastDrink t2 ON t1.bottle_id = t2.bottle_id
-        WHERE t1.stock_status_per > 0
-        AND t1.alcohol_type IN ('Single Malt Whisky', 'Blended Scotch Whisky')
-        AND (t2.last_sip IS NULL OR t2.last_sip < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY))
-        """
-        rows = list(client.query(query).result())
-        
-        if not rows:
+        dfh = get_history_as_df()
+        last_sip = {}
+        if dfh is not None and not dfh.empty:
+            # last update_time per bottle_id
+            try:
+                grp = dfh.groupby("bottle_id")["update_time"].max()
+                last_sip = grp.to_dict()
+            except Exception:
+                pass
+
+        now = datetime.now()
+        cutoff = now - timedelta(days=7)
+
+        # eligibility filters (same logic as before)
+        eligible = df.copy()
+        if "stock_status_per" in eligible.columns:
+            eligible = eligible[eligible["stock_status_per"].fillna(0) > 0]
+
+        if "alcohol_type" in eligible.columns:
+            eligible = eligible[eligible["alcohol_type"].isin(['Single Malt Whisky', 'Blended Scotch Whisky'])]
+
+        # last sip filter
+        def ok_last(bid):
+            t = last_sip.get(int(bid))
+            if t is None or pd.isna(t):
+                return True
+            # BigQuery timestamps might be tz-aware pandas; normalize to naive UTC
+            try:
+                t2 = pd.to_datetime(t).to_pydatetime()
+            except Exception:
+                return True
+            # if tz aware convert
+            try:
+                if getattr(t2, "tzinfo", None) is not None:
+                    t2 = t2.astimezone(tz=None).replace(tzinfo=None)
+            except Exception:
+                pass
+            return t2 < cutoff
+
+        if "bottle_id" in eligible.columns:
+            eligible = eligible[eligible["bottle_id"].apply(ok_last)]
+
+        if eligible.empty:
             return "No eligible bottles!", no_update
-        
-        choice = random.choice(rows)
+
+        choice = eligible.sample(1).iloc[0]
         display = html.Div([
-            html.H5(f"🥃 {choice.distillery} - {choice.bottle_name}", className="mb-0"),
-            html.Small(f"ID: {choice.bottle_id} | {choice.region}")
+            html.H5(f"🥃 {choice.get('distillery','')} - {choice.get('bottle_name','')}", className="mb-0"),
+            html.Small(f"ID: {int(choice.get('bottle_id'))} | {choice.get('region','')}")
         ])
-        
-        return display, choice.bottle_id
-        
+
+        return display, int(choice.get("bottle_id"))
+
     except Exception as e:
         return f"Error: {e}", no_update
+
 
 
 # 5. SAVE UPDATE (Modal Confirmation with Validation)
@@ -1730,106 +2071,87 @@ def random_dram(n):
      State('upd-palette', 'value'),
      State('upd-abv', 'value'),
      State('upd-nose-manual', 'value'),
-     State('upd-palette-manual', 'value')]
+     State('upd-palette-manual', 'value'),
+     State('glass-count', 'value')]
 )
-def handle_save_modal(n_save, n_close, n_confirm, is_open, meta, stock, nose, palette, abv, nose_man, pal_man):
+
+def handle_save_modal(n_save, n_close, n_confirm, is_open, meta, stock, nose, palette, abv, nose_man, pal_man, glasses):
     if not ctx.triggered_id or not meta:
         return False, ""
-    
-    if ctx.triggered_id == 'btn-save-update':
-        # Get ORIGINAL values from when bottle was loaded
-        try:
-            # Fetch current values from history to compare
-            q_current = f"""
-            SELECT nose, palette, alc_pre, stock_status_per
-            FROM (
-                SELECT nose, palette, alc_pre, NULL as stock_status_per
-                FROM `{HISTORY_TABLE_REF}`
-                WHERE bottle_id = {meta['bid']}
-                ORDER BY update_time DESC
-                LIMIT 1
-            )
-            UNION ALL
-            SELECT nose, palette, alcohol_percentage as alc_pre, stock_status_per
-            FROM `{TABLE_REF}`
-            WHERE bottle_id = {meta['bid']}
-            LIMIT 1
-            """
-            current_data = list(client.query(q_current).result())
-            
-            if current_data:
-                orig = current_data[0]
-                orig_nose = list(orig.nose) if orig.nose else []
-                orig_palette = list(orig.palette) if orig.palette else []
-                orig_abv = float(orig.alc_pre) if orig.alc_pre else meta['orig_abv']
-                orig_stock = float(meta['stock'])
-                
-                # Merge manual inputs
-                final_nose = list(nose) if nose else []
-                if nose_man:
-                    final_nose.extend([x.strip() for x in nose_man.split(',') if x.strip()])
-                
-                final_palette = list(palette) if palette else []
-                if pal_man:
-                    final_palette.extend([x.strip() for x in pal_man.split(',') if x.strip()])
-                
-                final_abv = float(abv) if abv else orig_abv
-                final_stock = float(stock) if stock is not None else orig_stock
-                
-                # CHECK IF ANYTHING CHANGED
-                nose_changed = set(final_nose) != set(orig_nose)
-                palette_changed = set(final_palette) != set(orig_palette)
-                abv_changed = abs(final_abv - orig_abv) > 0.01  # Allow small float differences
-                stock_changed = abs(final_stock - orig_stock) > 0.01
-                
-                if not (nose_changed or palette_changed or abv_changed or stock_changed):
-                    return True, html.Div([
-                        html.H4("⚠️ No Changes Detected", className="text-warning"),
-                        html.P("You must modify at least one field before saving:"),
-                        html.Ul([
-                            html.Li("Stock Level (%)"),
-                            html.Li("Nose notes"),
-                            html.Li("Palette notes"),
-                            html.Li("ABV (%)")
-                        ]),
-                        html.Hr(),
-                        html.Small("Please make changes or cancel.", className="text-muted")
-                    ])
-        
-        except Exception as e:
-            print(f"Validation error: {e}")
-            # If validation fails, continue anyway (failsafe)
-        
-        # Validate ABV
-        if abv and float(abv) > meta['orig_abv']:
-            return True, html.Div([
-                html.H4("❌ Invalid ABV", className="text-danger"),
-                html.P(f"New ABV ({abv}%) cannot exceed original ({meta['orig_abv']}%).")
-            ])
-        
-        # Merge manual inputs for display
-        final_nose = list(nose) if nose else []
-        if nose_man:
-            final_nose.extend([x.strip() for x in nose_man.split(',') if x.strip()])
-        
-        final_palette = list(palette) if palette else []
-        if pal_man:
-            final_palette.extend([x.strip() for x in pal_man.split(',') if x.strip()])
-        
-        # Show summary
-        summary = [
-            html.H4(meta['name'], className="text-primary"),
+
+    # Close
+    if ctx.triggered_id in ('close-modal-btn', 'confirm-update-btn'):
+        return False, ""
+
+    if ctx.triggered_id != 'btn-save-update':
+        return False, ""
+
+    # Normalize glasses -> drams
+    drams = int(glasses) if glasses not in (None, "") else 0
+    if drams < 0:
+        drams = 0
+
+    # Validate ABV
+    if abv and float(abv) > meta['orig_abv']:
+        return True, html.Div([
+            html.H4("❌ Invalid ABV", className="text-danger"),
+            html.P(f"New ABV ({abv}%) cannot exceed original ({meta['orig_abv']}%).")
+        ])
+
+    # Merge manual inputs
+    final_nose = list(nose) if nose else []
+    if nose_man:
+        final_nose.extend([x.strip() for x in nose_man.split(',') if x.strip()])
+
+    final_palette = list(palette) if palette else []
+    if pal_man:
+        final_palette.extend([x.strip() for x in pal_man.split(',') if x.strip()])
+
+    final_abv = float(abv) if abv else float(meta.get('orig_abv_resolved', meta['orig_abv']))
+    final_stock = float(stock) if stock is not None else float(meta.get('orig_stock_resolved', meta['stock']))
+
+    # ORIGINALS (from cached DF / latest history when bottle was loaded)
+    orig_nose = list(meta.get('orig_nose', []))
+    orig_palette = list(meta.get('orig_palette', []))
+    orig_abv = float(meta.get('orig_abv_resolved', meta['orig_abv']))
+    orig_stock = float(meta.get('orig_stock_resolved', meta['stock']))
+
+    # Change detection (include drams)
+    nose_changed = set(final_nose) != set(orig_nose)
+    palette_changed = set(final_palette) != set(orig_palette)
+    abv_changed = abs(final_abv - orig_abv) > 0.01
+    stock_changed = abs(final_stock - orig_stock) > 0.01
+    drams_changed = drams > 0
+
+    if not (nose_changed or palette_changed or abv_changed or stock_changed or drams_changed):
+        return True, html.Div([
+            html.H4("⚠️ No Changes Detected", className="text-warning"),
+            html.P("You must modify at least one field before saving:"),
+            html.Ul([
+                html.Li("Stock Level (%)"),
+                html.Li("Nose notes"),
+                html.Li("Palette notes"),
+                html.Li("ABV (%)"),
+                html.Li("Glasses (drams)")
+            ]),
             html.Hr(),
-            html.P([html.B("Stock: "), f"{meta['stock']}% → {stock}%"]),
-            html.P([html.B("ABV: "), f"{abv if abv else meta['orig_abv']}%"]),
-            html.P([html.B("Nose: "), ", ".join(final_nose) if final_nose else "No change"]),
-            html.P([html.B("Palette: "), ", ".join(final_palette) if final_palette else "No change"]),
-            html.Hr(),
-            html.Small("⚠️ This will save changes permanently.", className="text-muted")
-        ]
-        return True, html.Div(summary)
-    
-    return False, ""
+            html.Small("Please make changes or cancel.", className="text-muted")
+        ])
+
+    # Summary
+    summary = [
+        html.H4(meta['name'], className="text-primary"),
+        html.Hr(),
+        html.P([html.B("Stock: "), f"{orig_stock}% → {final_stock}%"]),
+        html.P([html.B("ABV: "), f"{orig_abv}% → {final_abv}%"]),
+        html.P([html.B("Nose: "), ", ".join(final_nose) if final_nose else "No change"]),
+        html.P([html.B("Palette: "), ", ".join(final_palette) if final_palette else "No change"]),
+        html.P([html.B("Drams: "), f"{drams}"]),
+        html.Hr(),
+        html.Small("⚠️ This will save changes permanently.", className="text-muted")
+    ]
+    return True, html.Div(summary)
+
 
 
 # 6. EXECUTE UPDATE (Clean Transaction)
@@ -1850,87 +2172,101 @@ def handle_save_modal(n_save, n_close, n_confirm, is_open, meta, stock, nose, pa
      State('upd-palette', 'value'),
      State('upd-abv', 'value'),
      State('upd-nose-manual', 'value'),
-     State('upd-palette-manual', 'value')],
+     State('upd-palette-manual', 'value'),
+     State('glass-count', 'value')],
     prevent_initial_call=True
 )
-def execute_update(n, meta, stock, nose, palette, abv, nose_man, pal_man):
+def execute_update(n, meta, stock, nose, palette, abv, nose_man, pal_man, glasses_cnt):
     if not n or not meta or not client:
         return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
-    
+
     try:
         # Merge values
         final_nose = list(nose) if nose else []
         if nose_man:
-            final_nose.extend([x.strip() for x in nose_man.split(',') if x.strip()])
-        
+            final_nose.extend([x.strip() for x in str(nose_man).split(',') if x.strip()])
+
         final_palette = list(palette) if palette else []
         if pal_man:
-            final_palette.extend([x.strip() for x in pal_man.split(',') if x.strip()])
-        
+            final_palette.extend([x.strip() for x in str(pal_man).split(',') if x.strip()])
+
+        # Drams counter = number of glasses poured (default 0)
+        drams_to_add = int(glasses_cnt or 0)
+
         # Format for SQL
         def sql_array(arr):
-            if not arr: return "[]"
+            if not arr:
+                return "[]"
             safe = [f"'{str(x).replace(chr(39), chr(92)+chr(39))}'" for x in arr]
             return f"[{', '.join(safe)}]"
-        
+
         sql_nose = sql_array(final_nose)
         sql_palette = sql_array(final_palette)
-        sql_abv = abv if abv else meta['orig_abv']
-        is_empty = (stock == 0)
-        safe_name = meta['name'].replace("'", "\\'")
-        bid = meta['bid']
-        
-        # Transaction
+        sql_abv = float(abv) if abv is not None else float(meta['orig_abv'])
+        is_empty = (float(stock) == 0)
+        safe_name = str(meta['name']).replace("'", "\\'")
+        bid = int(meta['bid'])
+
         sql = f"""
         BEGIN
             -- Update main table
             UPDATE `{TABLE_REF}`
-            SET stock_status_per = {stock},
+            SET stock_status_per = {float(stock)},
                 full_or_empy = {str(is_empty).lower()},
                 updating_time = CURRENT_TIMESTAMP(),
                 nose = {sql_nose},
                 palette = {sql_palette},
                 alcohol_percentage = {sql_abv}
             WHERE bottle_id = {bid};
-            
-            -- Insert history
+
+            -- Insert history (including drams_counter)
             INSERT INTO `{HISTORY_TABLE_REF}`
-            (update_id, bottle_id, bottle_name, stock_status_per, update_time, nose, palette, alc_pre)
+            (update_id, bottle_id, bottle_name, stock_status_per, update_time, nose, palette, alc_pre, drams_counter)
             VALUES (
                 (SELECT COALESCE(MAX(update_id), 0) + 1 FROM `{HISTORY_TABLE_REF}`),
                 {bid},
                 '{safe_name}',
-                {stock},
+                {float(stock)},
                 CURRENT_TIMESTAMP(),
                 {sql_nose},
                 {sql_palette},
-                {sql_abv}
+                {sql_abv},
+                {drams_to_add}
             );
         END;
         """
-        
+
         client.query(sql).result()
-        
-        # Refresh bottle list
+
+        # Force refresh of cached DFs (Update tab reads from them)
+        try:
+            CACHE_DATA['last_update'] = 0
+        except Exception:
+            pass
+        try:
+            CACHE_HISTORY['last_update'] = 0
+        except Exception:
+            pass
+
         new_list = fetch_bottle_list_optimized()
-        
-        # Success - keep bottle selected, reset UI
+
         return (
-            f"✅ Updated {meta['name']}!",
+            f"✅ Updated {meta['name']}! (+{drams_to_add} drams)",
             True,
             "success",
             new_list,
-            bid,  # Keep selected
-            100,  # Reset slider
-            "",   # Clear manual inputs
+            bid,
+            100,
             "",
-            0     # Reset edit button
+            "",
+            0
         )
-        
+
     except Exception as e:
         import traceback
         traceback.print_exc()
         return f"❌ Update failed: {e}", True, "danger", no_update, no_update, no_update, no_update, no_update, no_update
+
 
 
 # ============================================================================
@@ -2182,7 +2518,8 @@ def toggle_search_mode(mode):
     [Input('btn-run-search', 'n_clicks'),
      Input('sort-state', 'data'),
      Input('btn-prev-page', 'n_clicks'),
-     Input('btn-next-page', 'n_clicks')],
+     Input('btn-next-page', 'n_clicks'),
+      Input('view-mode-toggle', 'value'),],
     [State('search-text', 'value'),
      State('search-mode-toggle', 'value'),
      State('search-sweetness', 'value'),
@@ -2200,15 +2537,15 @@ def toggle_search_mode(mode):
      State('search-age-max', 'value'),
      State('search-stock-min', 'value'),
      State('search-stock-max', 'value'),
-     State('page-store', 'data')],
+     State('page-store', 'data'),],
     prevent_initial_call=True
 )
-def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_vals, casks, noses, palettes, country, dist, alc_type, 
+def search_bottles(n, sort_data, n_prev, n_next,view_mode, txt, mode, sweet_vals, rich_vals, casks, noses, palettes, country, dist, alc_type, 
                    bb_filter,abv_min, abv_max, age_min, age_max, stock_min, stock_max, page):
     
     # 1. טעינת הנתונים מהזיכרון (מהיר מאוד!)
     df = get_all_data_as_df()
-    
+    tiles = []
     if df.empty:
         return dbc.Alert("No data loaded or DB error", color="danger"), "0", 0, "", True, True
 
@@ -2667,106 +3004,389 @@ def search_bottles(n, sort_data, n_prev, n_next, txt, mode, sweet_vals, rich_val
                 return style
             except:
                 return {'className': 'small text-muted'}    
+    view_mode = (view_mode or 'tiles')
 
     if not rows:
         return dbc.Alert("No results", color="warning"), "0", 0, "Page 1", True, True
 
-    body = []
-    for r in rows:
-        # שינוי קריטי: מעבר מ-Dot Notation (r.field) ל-Dictionary Access (r['field'] או r.get())
-        
-        s_val = r.get('final_smoky_sweet_score')
-        r_val = r.get('final_richness_score')
+    # ----------------------------
+    # VIEW RENDERING (tiles/table)
+    # ----------------------------
 
-        label_sweet = get_label(s_val, SWEETNESS_RANGES)
-        label_rich = get_label(r_val, RICHNESS_RANGES)
+    # --- Sort bar (keeps existing sort callback working) ---
+    active_col = sort_data.get('col', 'bottle_id')
+    active_dir = sort_data.get('dir', 'DESC')
 
-        sweet_display = f"{label_sweet} - {s_val:.1f}" if s_val is not None else label_sweet
-        rich_display  = f"{label_rich} - {r_val:.1f}" if r_val is not None else label_rich
+    def _sort_label(ui_col, label):
+        if ui_col != active_col:
+            return label
+        return f"{label} {'▲' if active_dir == 'ASC' else '▼'}"
 
-        bottle_id_int = int(r['bottle_id'])
+    sort_bar = dbc.ButtonGroup(
+        [
+            dbc.Button(_sort_label(col_key, col_label),
+                       id={'type': 'sort-head', 'index': col_key},
+                       color="dark" if col_key == active_col else "secondary",
+                       outline=True if col_key != active_col else False,
+                       size="sm",
+                       className="me-1 mb-1")
+            for (col_label, col_key) in cols
+            if col_key not in ("details",)
+        ],
+        className="mb-3"
+    )
+    # If user chose TABLE view, render a sortable table (details uses the same Details button + collapse IDs)
+    if view_mode == 'table':
+        table_cols = [
+            ("ID", "bottle_id"),
+            ("Distillery", "distillery"),
+            ("Bottle Name", "bottle_name"),
+            ("Sweetness", "final_smoky_sweet_score"),
+            ("Richness", "final_richness_score"),
+            ("ABV", "alcohol_percentage"),
+            ("Age", "age"),
+            ("Price", "price"),
+            ("Popularity", "avg_consumption_vol_per_day"),
+            ("Est Depletion", "predicted_finish_date"),
+            ("Best Before", "Best_Before"),
+            ("Stock", "stock_status_per"),
+            ("Details", "details"),
+        ]
 
-        # --- Chevron button (▶ / ▼) ---
-        details_btn = dbc.Button(
-            "▶",
-            id={'type': 'details-btn', 'index': bottle_id_int},
-            color="link",
-            size="sm",
-            n_clicks=0,
-            style={
-                "fontSize": "18px",
-                "padding": "0",
-                "fontWeight": "900",
-                "textDecoration": "none"
-            }
+        headers = [html.Th(lbl) for (lbl, _f) in table_cols]
+        body = []
+
+        for r in rows:
+            bottle_id_int = int(r.get('bottle_id', 0))
+
+            # Sweet/Rich labels
+            s_val = r.get('final_smoky_sweet_score', None)
+            rr_val = r.get('final_richness_score', None)
+            label_sweet = get_label(s_val, SWEETNESS_RANGES)
+            label_rich  = get_label(rr_val, RICHNESS_RANGES)
+
+            try:
+                s_float = float(s_val) if s_val is not None else None
+            except:
+                s_float = None
+            try:
+                r_float = float(rr_val) if rr_val is not None else None
+            except:
+                r_float = None
+
+            sweet_display = f"{label_sweet} - {s_float:.1f}" if s_float is not None else label_sweet
+            rich_display  = f"{label_rich} - {r_float:.1f}" if r_float is not None else label_rich
+
+            # Best before styling
+            bb_val = str(r.get('Best_Before', '-'))
+            bb_style = get_date_style(bb_val)
+
+            details_btn = dbc.Button(
+                "Details",
+                id={'type': 'details-btn', 'index': bottle_id_int},
+                color="primary",
+                outline=True,
+                size="sm",
+                n_clicks=0
+            )
+
+            details_card = dbc.Card(
+                dbc.CardBody([
+                    html.Div([
+                        html.Div([html.Span("👃 Nose: ", style={"fontWeight": "800"}), _chips(r.get('nose', []))]),
+                        html.Div(className="mt-2"),
+                        html.Div([html.Span("👅 Palate: ", style={"fontWeight": "800"}), _chips(r.get('palette', []))]),
+                        html.Div(className="mt-2"),
+                        html.Div([html.Span("🪵 Casks: ", style={"fontWeight": "800"}), _chips(r.get('casks_aged_in', []))]),
+                    ])
+                ], className="py-2"),
+                className="border-0",
+                style={"backgroundColor": "#f8f9fa", "borderRadius": "14px"}
+            )
+
+            # Main row cells
+            row_cells = [
+                html.Td(r.get('bottle_id', '-')),
+                html.Td(str(r.get('distillery', '-'))),
+                html.Td(str(r.get('bottle_name', '-')), style={"fontWeight": 700}),
+                html.Td(html.Span(sweet_display, style=badge_style_sweet(s_float, sweet_display), className="badge border rounded-pill")),
+                html.Td(html.Span(rich_display,  style=badge_style_rich(r_float, rich_display), className="badge border rounded-pill")),
+                html.Td(f"{r.get('alcohol_percentage', '-') }%"),
+                html.Td(f"{int(r.get('age'))}Y" if r.get('age') else "-"),
+                html.Td(f"₪{int(r.get('price'))}" if r.get('price') else "-"),
+                html.Td(f"{round(float(r.get('avg_consumption_vol_per_day', 0)), 4)}" if r.get('avg_consumption_vol_per_day') is not None else "-"),
+                html.Td(str(r.get('predicted_finish_date', '-'))),
+                html.Td(html.Span(bb_val, style=bb_style)),
+                html.Td(f"{r.get('stock_status_per', '-') }%"),
+                html.Td(details_btn),
+            ]
+            body.append(html.Tr(row_cells))
+
+            # Details collapse row (spans all columns)
+            body.append(html.Tr([
+                html.Td(
+                    dbc.Collapse(
+                        details_card,
+                        id={'type': 'details-collapse', 'index': bottle_id_int},
+                        is_open=False,
+                    ),
+                    colSpan=len(table_cols),
+                    style={"padding": "0.25rem 0.75rem"}
+                )
+            ]))
+
+        table = dbc.Table(
+            [html.Thead(html.Tr(headers)), html.Tbody(body)],
+            bordered=True, hover=True, striped=True, responsive=True
         )
 
-        # --- Details content ---
+        table_wrap = html.Div([sort_bar, table], className="premium-results")
+        return (table_wrap, f"{total_rows} Records", page, f"Page {page+1}", page == 0, page >= total_pages - 1)
+
+
+    for r in rows:
+        # safe pulls
+        bottle_id_int = int(r.get('bottle_id', 0))
+
+        s_val = r.get('final_smoky_sweet_score', None)
+        r_val = r.get('final_richness_score', None)
+
+        label_sweet = get_label(s_val, SWEETNESS_RANGES)
+        label_rich  = get_label(r_val, RICHNESS_RANGES)
+
+        try:
+            s_float = float(s_val) if s_val is not None else None
+        except (ValueError, TypeError):
+            s_float = None
+
+        try:
+            r_float = float(r_val) if r_val is not None else None
+        except (ValueError, TypeError):
+            r_float = None
+
+        sweet_display = f"{label_sweet} - {s_float:.1f}" if s_float is not None else label_sweet
+        rich_display  = f"{label_rich} - {r_float:.1f}" if r_float is not None else label_rich
+
+        # Best before styling
+        bb_val = str(r.get('Best_Before', '-'))
+        bb_style = get_date_style(bb_val)
+
+        # Details toggle (reuses your existing open-store + collapse sync callbacks)
+        details_btn = dbc.Button(
+            "Details",
+            id={'type': 'details-btn', 'index': bottle_id_int},
+            color="primary",
+            outline=True,
+            size="sm",
+            n_clicks=0,
+            className="ms-auto"
+        )
+
         details_card = dbc.Card(
             dbc.CardBody([
                 html.Div([
                     html.Div([html.Span("👃 Nose: ", style={"fontWeight": "800"}), _chips(r.get('nose', []))]),
                     html.Div(className="mt-2"),
                     html.Div([html.Span("👅 Palate: ", style={"fontWeight": "800"}), _chips(r.get('palette', []))]),
+                    html.Div(className="mt-2"),
+                    html.Div([html.Span("🪵 Casks: ", style={"fontWeight": "800"}), _chips(r.get('casks_aged_in', []))]),
                 ])
             ], className="py-2"),
             className="border-0",
             style={"backgroundColor": "#f8f9fa", "borderRadius": "14px"}
         )
 
-# חישוב הסטייל לתאריך
-        bb_val = str(r.get('Best_Before', '-'))
-        bb_style = get_date_style(bb_val)
-        
-        # --- Main row ---
-        body.append(html.Tr([
-            html.Td(r['bottle_id']),
-            html.Td(r['distillery']),
-            html.Td(r['bottle_name'], style={'fontWeight': 'bold'}),
+        # Premium tile
+        tile = dbc.Card(
+            [
+            html.Div(
+                        [
+                            # --- Title Row ---
+                            html.Div(
+                                [
+                                    html.P(
+                                        str(r.get('bottle_name', '-')),
+                                        className="premium-tile-title mb-0"
+                                    ),
 
-            html.Td(html.Span(
-                sweet_display,
-                style=badge_style_sweet(s_val, sweet_display),
-                className="badge border rounded-pill w-100"
-            )),
+                                    html.Div([
+                                        html.Span("Avg ml/Day: ", style={"fontWeight": 800}),
+                                        html.Span(
+                                            f"{round(float(r.get('avg_consumption_vol_per_day', 0)), 4)} ml"
+                                        ),
+                                    ], style={"whiteSpace": "nowrap"})
+                                ],
+                                style={
+                                    "display": "flex",
+                                    "justifyContent": "space-between",
+                                    "alignItems": "center"
+                                }
+                            ),
 
-            html.Td(html.Span(
-                children=rich_display,
-                style=badge_style_rich(r_val, rich_display),
-                className="badge border rounded-pill w-100"
-            )),
+                            # --- Subtitle Row ---
+                            html.Div(
+                                [
+                                    html.Span(str(r.get('distillery', '-'))),
+                                    html.Span(" • ", style={"opacity": 0.6}),
+                                    html.Span(str(r.get('origin_country', '-'))),
+                                    html.Span(" • ", style={"opacity": 0.6}),
+                                    html.Span(str(r.get('region', '-'))),
+                                ],
+                                className="premium-tile-subtitle"
+                            ),
+                        ],
+                        className="premium-tile-cover"
+                    ),
 
-            html.Td(f"{r['alcohol_percentage']}%"),
-            html.Td(r['age'] if r['age'] else "-"),
-            html.Td(f"{int(r['price'])}₪" if r['price'] else "-"),
-            html.Td(f"{round(r['avg_consumption_vol_per_day'],4)} ml",style={'fontWeight': 'bold'}),
-            html.Td(str(r.get('predicted_finish_date', '-')),style={'fontWeight': 'bold'}, className="regular text-muted"),
-            # כאן השינוי: שימוש ב-bb_style החדש
-                        html.Td(bb_val, style=bb_style),
-            html.Td(progress_bar(r['stock_status_per']), style={'width': '140px'}),
+                dbc.CardBody(
+                    [
+                        # Sweet/Rich badges
+                        html.Div(
+                            [
+                                html.Span(
+                                    sweet_display,
+                                    style=badge_style_sweet(s_float, sweet_display),
+                                    className="badge border rounded-pill me-2 mb-2"
+                                ),
+                                html.Span(
+                                    rich_display,
+                                    style=badge_style_rich(r_float, rich_display),
+                                    className="badge border rounded-pill me-2 mb-2"
+                                ),
 
-            # NEW: chevron cell
-            html.Td(details_btn, style={"width": "40px", "textAlign": "center"})
-        ]))
+                            ],
+                            className="d-flex flex-wrap align-items-center"
+                        ),
 
-        # --- Collapsible details row (accordion style) ---
-        body.append(html.Tr([
-            html.Td(
-                dbc.Collapse(
-                    details_card,
-                    id={'type': 'details-collapse', 'index': bottle_id_int},
-                    is_open=False
-                ),
-                colSpan=len(cols),  # IMPORTANT: must span all columns (including details)
-                style={"padding": "0.25rem 0.75rem"}
+                        # Stats row
+                        dbc.Row(
+                            [
+                                dbc.Col(
+                                    html.Div([
+                                        html.Div("ABV", className="premium-stat"),
+                                        html.Strong(f"{r.get('alcohol_percentage', '-') }%")
+                                    ]),
+                                    width=4
+                                ),
+                                dbc.Col(
+                                    html.Div([
+                                        html.Div("Age", className="premium-stat"),
+                                        html.Strong(f"{int(r.get('age'))}Y" if r.get('age') else "-")
+                                    ]),
+                                    width=4
+                                ),
+                                dbc.Col(
+                                    html.Div([
+                                        html.Div("Price", className="premium-stat"),
+                                        html.Strong(f"₪{int(r.get('price'))}" if r.get('price') else "-")
+                                    ]),
+                                    width=4
+                                ),
+                            ],
+                            className="mb-2"
+                        ),
+
+                        # Consumption/forecast
+                        html.Div(
+                            [
+
+
+                                # Est. Depletion + Best Before באותה שורה
+                                html.Div(
+                                    [
+
+
+                                        # Best Before Depletion קטן יותר ובאותה שורה
+                                        html.Div(
+                                            [
+                                                html.Span(
+                                                    "Best Before: ",
+                                                    style={
+                                                        "fontSize": "14px",
+                                                        "fontWeight": 600,
+                                                        "marginRight": "6px"
+                                                    }
+                                                ),
+
+                                                html.Span(
+                                                    bb_val,
+                                                    style={
+                                                        **bb_style,
+                                                        "display": "inline-block",
+                                                        "padding": "4px 8px",
+                                                        "borderRadius": "999px",
+                                                        "fontSize": "14px",
+                                                        "opacity": 0.95
+                                                    }
+                                                )
+                                            ],
+                                            style={
+                                                "marginLeft": "10px",
+                                                "display": "flex",
+                                                "alignItems": "center"
+                                            }
+                                        ),
+                                        html.Div(
+                                            [
+                                                html.Span("Est. Depletion: ", style={"fontWeight": 800}),
+                                                html.Span(str(r.get('predicted_finish_date', '-')))
+                                            ],
+                                            style={"fontSize": "14px"}  # ✅ גדול יותר
+                                        ),
+                                    ],
+                                    className="d-flex align-items-center justify-content-between"
+                                )
+                            ],
+                            className="mb-2"
+                        ),
+
+                        # Stock
+                        html.Div(progress_bar(float(r.get('stock_status_per', 0))), className="mb-2"),
+
+                        # Actions + collapse
+                        html.Div(
+                            [
+                                html.Div(
+                                    [
+                                        dbc.Badge(str(r.get('alcohol_type', '-')), color="secondary", pill=True, className="me-2"),
+                                        dbc.Badge(f"ID {bottle_id_int}", color="dark", pill=True)
+                                    ],
+                                    className="d-flex align-items-center"
+                                ),
+                                details_btn
+                            ],
+                            className="d-flex align-items-center mt-2"
+                        ),
+
+                        dbc.Collapse(
+                            details_card,
+                            id={'type': 'details-collapse', 'index': bottle_id_int},
+                            is_open=False,
+                            className="mt-3"
+                        ),
+                    ]
+                )
+            ],
+            className="premium-tile"
+        )
+
+        tiles.append(
+            dbc.Col(
+                tile,
+                xs=12, sm=6, md=4,
+                className="mb-4"
             )
-        ]))
-    
-    table = dbc.Table([html.Thead(html.Tr(headers)), html.Tbody(body)],
-                      bordered=True, hover=True, striped=True, responsive=True)
-    
-    return (table, f"{total_rows} Records", page, f"Page {page+1} of {total_pages}",
+        )
+
+    grid = dbc.Row(tiles, className="g-3")
+
+    results = html.Div([sort_bar, grid], className="premium-results")
+
+    return (results, f"{total_rows} Records", page, f"Page {page+1} of {total_pages}",
             page == 0, (page + 1) >= total_pages)
+
+
+
         
 
     
