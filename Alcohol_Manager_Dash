@@ -366,7 +366,20 @@ def get_history_as_df():
     return dfh
 
 
-
+def _fmt_date(d):
+    """Accepts date/datetime/str; returns YYYY-MM-DD or '-'."""
+    if d is None or (isinstance(d, float) and pd.isna(d)):
+        return "-"
+    try:
+        # pandas Timestamp / datetime / date
+        if hasattr(d, "date"):
+            return d.date().isoformat() if hasattr(d, "time") else d.isoformat()
+    except Exception:
+        pass
+    try:
+        return pd.to_datetime(d).date().isoformat()
+    except Exception:
+        return str(d)
 
 # --- Layout ---
 app.layout = dbc.Container([
@@ -1774,6 +1787,7 @@ def poll_scan_status(n, session_id, cask_opts, nose_opts,
 
 def load_bottle_data(bottle_id):
     # NOTE: Update tab must read from the cached DF (refreshes every 5 minutes)
+    
     if not bottle_id:
         return None, [], [], [], [], None, []
 
@@ -1852,9 +1866,14 @@ def load_bottle_data(bottle_id):
         }
 
         current_ml = int(meta["vol"] * (meta["stock"] / 100.0))
+        pred_finish = r.get("predicted_finish_date") if isinstance(r, dict) else getattr(r, "predicted_finish_date", None)
+        pred_finish_str = _fmt_date(pred_finish)
+        pred_txt  = f"Predicted finish: {pred_finish_str}"
+        
         badges = [
             dbc.Badge(f"Total: {meta['vol']}ml", color="dark", className="mr-2"),
-            dbc.Badge(f"Current: {current_ml}ml", color="info")
+            dbc.Badge(f"Current: {current_ml}ml", color="info"),
+             dbc.Badge(pred_txt, color="warning", className="me-2", pill=True),
         ]
 
         return meta, nose_opts, nose_values, palette_opts, palette_values, abv_value, badges
