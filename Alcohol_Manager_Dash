@@ -568,10 +568,17 @@ app.layout = dbc.Container([
                         html.Div(id='discount-fields-wrapper', style={'display': 'none', 'display': 'contents'}, children=[
                             create_dynamic_input('new-discount_amount', "Discount %"),
                             dbc.Col([dbc.Label("Discounted Price"), dbc.Input(id='new-discounted-price', type='number', placeholder="Auto-calc")], width=3),
-                        ])
-                    ])
+                        ]),
+                    ]),
                 ], className="mb-4"),
-
+                
+                dbc.Row([
+                    dbc.Col([
+                        dbc.Label("VFM Score"),
+                        dbc.Input(id='rvfm_score', type='text', disabled=True,style={'width':300,'font-weight':'bold'})
+                    ])
+                ], className="mb-2"),
+                                 
                 html.Hr(),
                 html.H5("Details & Inventory", className="mb-3"),
                 dbc.Row([
@@ -1165,7 +1172,283 @@ def mobile_upload(session_id):
         </body>
     </html>
     """
+def rarity_scoring(age, rarity):
+    age = int(age) if age is not None else 0
 
+    if rarity == 'Core Range':
+        return 1
+    elif rarity == 'Small Batch' and 1 <= age <= 11:
+        return 2
+    elif rarity == 'Small Batch' and 12 <= age <= 14:
+        return 2.1
+    elif rarity == 'Small Batch' and 15 <= age <= 17:
+        return 2.2
+    elif rarity == 'Small Batch' and age == 18:
+        return 2.3
+    elif rarity == 'Small Batch' and 19 <= age <= 20:
+        return 2.4
+    elif rarity == 'Small Batch' and 21 <= age <= 22:
+        return 2.5
+    elif rarity == 'Small Batch' and 23 <= age <= 24:
+        return 2.6
+    elif rarity == 'Small Batch' and 25 <= age <= 26:
+        return 2.7
+    elif rarity == 'Small Batch' and 27 <= age <= 28:
+        return 2.8
+    elif rarity == 'Small Batch' and 29 <= age <= 30:
+        return 2.9
+    elif rarity == 'Small Batch' and age > 30:
+        return 2.99
+    elif rarity == 'Limited Edition':
+        return 3
+    elif rarity == 'Local Distillery Core Range':
+        return 4
+    elif rarity == 'Private Release Blend':
+        return 5
+    elif rarity == 'Single Cask':
+        return 6
+    elif rarity == 'Private Release Single Cask':
+        return 7
+    elif rarity == 'Distillery Edition Single Cask':
+        return 8
+    else:
+        return 0
+
+
+def price_scoring(price, dprice):
+    base = dprice if (dprice is not None and float(dprice) > 0) else price
+    if base is None or float(base) <= 0:
+        return 0
+    base = float(base)
+    return 10 - (((base - 100) / (1800 - 100)) * 9)
+
+
+def abv_scoring(abv):
+    if abv is None:
+        return 0
+    abv = float(abv)
+    if abv <= 0:
+        return 0
+    return (((abv - 40) / 30) * 9) + 1
+
+
+def compute_rvfm(age, abv, rarity, price, dprice=None):
+    """
+    חישוב ציון RVFM (Value For Money).
+    מחזיר float בין 0.0 ל-10.0.
+    """
+    age  = int(age)   if age  is not None else 0
+    abv  = float(abv) if abv  is not None else 0.0
+
+    dprice_f = float(dprice) if dprice is not None else 0.0
+    price_f  = float(price)  if price  is not None else 0.0
+    base     = dprice_f if dprice_f > 0 else price_f
+
+    if base <= 0:
+        return 0.0
+
+    def _price_pen(excess, step, pen_per_step):
+        """עונש מחיר: כמה יחידות של step בתוך excess × pen_per_step"""
+        return -int(excess / step) * pen_per_step
+
+    def _abv_delta(abv_val, threshold, pen_per_pct, bonus_per_pct, bonus_max):
+        """עונש/בונוס ABV ביחס לסף"""
+        if abv_val < threshold:
+            return -round((threshold - abv_val) * pen_per_pct, 2)
+        elif abv_val > threshold:
+            return round(min(bonus_max, (abv_val - threshold) * bonus_per_pct), 2)
+        return 0.0
+
+    def _age_bonus(age_val, threshold=12, per_year=0.1):
+        """בונוס גיל מעל סף"""
+        return round((age_val - threshold) * per_year, 2) if age_val > threshold else 0.0
+
+    score = 10.0
+
+    # ── CORE RANGE ────────────────────────────────────────────────────────────
+    # 100₪ = 10.0
+    # Zone 1 (≤200₪): כל 20₪ → -0.1
+    # Zone 2 (>200₪): כל 20₪ → -0.3
+    if rarity == 'Core Range':
+        # Zone 1: 100–200₪ → כל 10₪ = -0.2  (100=10.0, 200=8.0)
+        # Zone 2: 200–275₪ → כל 25₪ = -0.4  (225=7.6, 275=6.8)
+        # Zone 3: 275₪+    → כל 25₪ = -0.6  (350=5.0, 400=3.8)
+        if base <= 200:
+            score = 10.0 - int((base - 100) / 10) * 0.2
+        elif base <= 275:
+            score = 8.0 - int((base - 200) / 25) * 0.4
+        else:
+            score = 8.0 - int((275 - 200) / 25) * 0.4 - int((base - 275) / 25) * 0.6
+        score += _abv_delta(abv, threshold=40, pen_per_pct=0.0, bonus_per_pct=0.15,
+                            bonus_max=(70 - 40) * 0.15)
+
+    # ── SMALL BATCH ───────────────────────────────────────────────────────────
+    # 200₪ + 46% = 10.0
+    # מחיר: כל 20₪ מעל 200 → -0.3
+    # ABV:  <46% → -0.2/% | >46% → +0.2/% (מקס 70%)
+    # גיל:  כל שנה מעל 12 → +0.1
+    elif rarity == 'Small Batch':
+        if base > 200:
+            score += _price_pen(base - 200, 20, 0.3)
+        score += _abv_delta(abv, threshold=46, pen_per_pct=0.2, bonus_per_pct=0.2,
+                            bonus_max=(70 - 46) * 0.2)
+        score += _age_bonus(age)
+
+    # ── LIMITED EDITION ───────────────────────────────────────────────────────
+    # 275₪ + 46% = 10.0
+    # מחיר: 275–400₪ → -0.3/25₪ | >400₪ → -0.5/25₪
+    # ABV:  <46% → -0.25/% | >46% → +0.2/% (מקס 70%)
+    # גיל:  כל שנה מעל 12 → +0.1
+    elif rarity == 'Limited Edition':
+        # Zone 1: ≤275₪    → 10.0
+        # Zone 2: 275–300₪ → כל 25₪ = -0.5  (300=9.5)
+        # Zone 3: 300–350₪ → כל 25₪ = -1.0  (350=7.5)
+        # Zone 4: 350₪+    → כל 25₪ = -0.5  (450=5.5)
+        if base <= 275:
+            score = 10.0
+        elif base <= 300:
+            score = 10.0 - int((base - 275) / 25) * 0.5
+        elif base <= 350:
+            score = 9.5 - int((base - 300) / 25) * 1.0
+        else:
+            score = 7.5 - int((base - 350) / 25) * 0.4
+        score += _abv_delta(abv, threshold=46, pen_per_pct=0.25, bonus_per_pct=0.2,
+                            bonus_max=(70 - 46) * 0.2)
+        score += _age_bonus(age)
+
+    # ── LOCAL DISTILLERY CORE RANGE ───────────────────────────────────────────
+    # 225₪ + 40% = 10.0
+    # מחיר: כל 25₪ מעל 225 → -0.4
+    # ABV:  <40% → -0.1/% | >40% → +0.1/% (מקס 70%)
+    elif rarity == 'Local Distillery Core Range':
+        # בסיס (לפני ABV): 200=9.4, 225=8.7, 250=7.5, 275=5.5, 300=5.0
+        # עם ABV 46%: 200=10.0, 225=9.3, 250=8.1, 275=6.1, 300=5.6, 325=4.6
+        if base <= 200:
+            score = 9.4
+        elif base <= 225:
+            score = 9.4 - 0.7
+        elif base <= 250:
+            score = 8.7 - 1.2
+        elif base <= 275:
+            score = 7.5 - 2.0
+        elif base <= 300:
+            score = 5.5 - 0.5
+        else:
+            score = 5.0 - int((base - 300) / 25) * 1.0
+        score += _abv_delta(abv, threshold=40, pen_per_pct=0.1, bonus_per_pct=0.1,
+                            bonus_max=(70 - 40) * 0.1)
+
+
+    # ── PRIVATE RELEASE BLEND ─────────────────────────────────────────────────
+    # 225₪ + 45% = 10.0
+    # מחיר: כל 25₪ מעל 225 → -0.4
+    # ABV:  <45% → -0.2/% | >45% → +0.2/% (מקס 70%)
+    # גיל:  כל שנה מעל 12 → +0.1
+    elif rarity == 'Private Release Blend':
+        # מחיר: 275=10, 350=8.5 (-0.5/25), 400=8 (-0.25/25), 500=6 (-0.5/25), 500+=5
+        if base <= 275:
+            score = 10.0
+        elif base <= 350:
+            score = 10.0 - int((base - 275) / 25) * 0.5
+        elif base <= 400:
+            score = 8.5 - int((base - 350) / 50) * 0.5
+        elif base <= 500:
+            score = 8.0 - int((base - 400) / 25) * 0.5
+        else:
+            score = 5.0
+        # ABV: כל 1% מתחת ל-46% → -0.4 | כל 1% מעל → +0.1
+        score += _abv_delta(abv, threshold=46, pen_per_pct=0.4, bonus_per_pct=0.1,
+                            bonus_max=(70 - 46) * 0.1)
+        score += _age_bonus(age)
+
+    # ── SINGLE CASK ───────────────────────────────────────────────────────────
+    # 300₪ + 55% = 10.0
+    # מחיר: כל 25₪ מעל 300 → -0.4
+    # ABV:  <55% → -0.2/% | >55% → +0.1/% (מקס 70%)
+    # גיל:  כל שנה מעל 12 → +0.1
+    elif rarity == 'Single Cask':
+        if base > 300:
+            score += _price_pen(base - 300, 25, 0.4)
+        score += _abv_delta(abv, threshold=55, pen_per_pct=0.2, bonus_per_pct=0.1,
+                            bonus_max=(70 - 55) * 0.1)
+        score += _age_bonus(age)
+
+    # ── PRIVATE RELEASE SINGLE CASK ───────────────────────────────────────────
+    # 225₪ + 55% = 10.0 (Single Cask מוזז ל-225₪)
+    # מחיר: כל 25₪ מעל 225 → -0.4
+    # ABV:  <55% → -0.2/% | >55% → +0.1/% (מקס 70%)
+    # גיל:  כל שנה מעל 12 → +0.1
+    elif rarity == 'Private Release Single Cask':
+        if base > 225:
+            score += _price_pen(base - 225, 25, 0.4)
+        score += _abv_delta(abv, threshold=55, pen_per_pct=0.2, bonus_per_pct=0.1,
+                            bonus_max=(70 - 55) * 0.1)
+        score += _age_bonus(age)
+
+    # ── DISTILLERY EDITION SINGLE CASK ────────────────────────────────────────
+
+    elif rarity == 'Distillery Edition Single Cask':
+        # 300=10, 325=9(-1.0/25), 350=8.5, 375=8, 400=7.5(-0.5/25),
+        # 450=7(-0.25/25), 500=6(-0.5/25), 500+: כל 50₪ → -0.5
+        if base <= 300:
+            score = 10.0
+        elif base <= 325:
+            score = 10.0 - int((base - 300) / 25) * 1.0
+        elif base <= 400:
+            score = 9.0 - int((base - 325) / 25) * 0.5
+        elif base <= 500:
+            score = 7.5 - int((base - 400) / 25) * 0.25
+        else:
+            score = 6.0 - int((base - 500) / 50) * 0.5
+        # ABV: <55% → -0.2/% | >55% → +0.1/% (מקס 70%)
+        score += _abv_delta(abv, threshold=55, pen_per_pct=0.2, bonus_per_pct=0.1,
+                            bonus_max=(70 - 55) * 0.1)
+        score += _age_bonus(age)
+
+    else:
+        return 0.0
+
+    return round(max(0.0, min(10.0, score)), 2)
+
+
+@app.callback(
+    Output('rvfm_score', 'value'),
+    [
+        Input('new-age', 'value'),
+        Input('new-abv', 'value'),
+        Input('new-rarity-dropdown', 'value'),
+        Input('new-alcohol_type-dropdown', 'value'),
+        Input('new-price', 'value'),
+        Input('new-discount_amount-input', 'value'),
+    ],
+)
+def rvfm_auto_value(nage, nabv, nrar, ntype, price, dprice):
+    try:
+        if nage is None or nabv is None or not nrar or ntype != "Single Malt Whisky" or price is None or float(price) <= 0:
+            return "Missing Data!"
+
+        score = compute_rvfm(nage, nabv, nrar, price, dprice)
+        tag = rvfm_tag(score)
+        return f"{score} {tag}"
+
+    except Exception:
+        return "Missing Data!"
+
+
+def rvfm_tag(rvfm_value):
+    """תג VFM לפי ציון RVFM"""
+    vfm_val = float(rvfm_value)
+    if vfm_val > 9:
+        return "🟢 מציאה"
+    elif vfm_val > 7.5:
+        return "🟢 שווה"
+    elif vfm_val > 6.8:
+        return "🟡 הוגן"
+    elif vfm_val > 5.5:
+        return "🟠 יקר יחסית"
+    else:
+        return "🔴 לא שווה"
+    
 # ============================================================================
 # CALLBACKS - UPDATE TAB (CLEAN REWRITE)
 # ============================================================================
