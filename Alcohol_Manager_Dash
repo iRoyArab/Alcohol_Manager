@@ -86,7 +86,7 @@ TABLE_ID = "my_whisky_collection"
 HISTORY_TABLE_ID = "alcohol_update"
 Forecast_id = "consumption_forecast"
 VIEW_ID = "bottles_flavor_aroma_mapping" # New View
-
+FLAVOR_ID = "flavor_master_mapping"
 
 
 # --- Range Definitions ---
@@ -174,6 +174,10 @@ TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 HISTORY_TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{HISTORY_TABLE_ID}"
 FORECAST_TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{Forecast_id}"
 VIEW_REF = f"{PROJECT_ID}.{DATASET_ID}.{VIEW_ID}"
+FLAVORS_REF = f"{PROJECT_ID}.{DATASET_ID}.{FLAVOR_ID}"
+
+
+
 # --- Init Services ---
 try:
     client = bigquery.Client.from_service_account_json(SERVICE_ACCOUNT_FILE, project=PROJECT_ID)
@@ -364,6 +368,7 @@ def get_all_data_as_df():
     return df
 
 
+
 # Cache for history table (update tab usage)
 CACHE_HISTORY = {"df": None, "last_update": 0}
 
@@ -391,6 +396,25 @@ def get_history_as_df():
     CACHE_HISTORY["last_update"] = time.time()
     return dfh
 
+
+def get_flavors_df():
+    # בדיקה אם צריך לרענן (למשל כל 5 דקות)
+    if CACHE_DATA["df"] is not None and (time.time() - CACHE_DATA["last_update"] < 86400):
+        return CACHE_DATA["df"]
+
+    # השאילתה המלאה - מביאה את כל המידע בפעם אחת
+    query = f"""
+    SELECT flavor_name, richness_score, smoky_sweet_score
+    FROM `{FLAVORS_REF}` t1
+
+    """
+    
+    df = client.query(query).to_dataframe()
+    return df
+
+
+global flavors_df
+flavors_df = get_flavors_df()
 
 def _fmt_date(d):
     """Accepts date/datetime/str; returns YYYY-MM-DD or '-'."""
@@ -580,12 +604,25 @@ app.layout = dbc.Container([
                 ], className="mb-2"),
                                  
                 html.Hr(),
-                html.H5("Details & Inventory", className="mb-3"),
+                html.H5("Flavors & Aroma Profile", className="mb-3"),
                 dbc.Row([
                     create_dynamic_input('new-casks_aged_in', "Casks", True),
                     create_dynamic_input('new-nose', "Nose", True),
                     create_dynamic_input('new-palette', "Palette", True),
+                    
                 ]),
+                dbc.Row([
+                    dbc.Col([
+                        dbc.Label("Predicted Sweetness Score"),
+                        dbc.Input(id='sweet_score', type='text', disabled=True,style={'width':300,'font-weight':'bold','border-radius':50})
+                    ]),
+                    dbc.Col([
+                        dbc.Label("Predicted Richness Score"),
+                        dbc.Input(id='rich_score', type='text', disabled=True,style={'width':300,'font-weight':'bold','border-radius':50})
+                    ]),
+                ], className="mb-2"),
+                html.Hr(),
+                html.H5("Details & Inventory", className="mb-3"),
                 dbc.Row([
                     create_dynamic_input('new-orignal_volume', "Vol (ml)"),
                     dbc.Col([dbc.Label("Purchase Date"), dcc.DatePickerSingle(id='new-purchase_date', display_format='YYYY-MM-DD', date=datetime.now().date())], width=2),
@@ -1419,15 +1456,21 @@ def compute_rvfm(age, abv, rarity, price, dprice=None):
         Input('new-rarity-dropdown', 'value'),
         Input('new-alcohol_type-dropdown', 'value'),
         Input('new-price', 'value'),
-        Input('new-discount_amount-input', 'value'),
+        Input('new-discounted-price', 'value'),
     ],
 )
-def rvfm_auto_value(nage, nabv, nrar, ntype, price, dprice):
+def rvfm_auto_value(nage, nabv, nrar, ntype, price, discount_amount):
     try:
         if nage is None or nabv is None or not nrar or ntype != "Single Malt Whisky" or price is None or float(price) <= 0:
             return "Missing Data!"
 
-        score = compute_rvfm(nage, nabv, nrar, price, dprice)
+        try:
+            da = float(discount_amount)
+            discounted_price = float(price) - da if da > 0 else None
+        except (TypeError, ValueError):
+            discounted_price = None
+        print(f"DEBUG: price={price}, discount_amount={discount_amount!r}, discounted_price={discounted_price}")
+        score = compute_rvfm(nage, nabv, nrar, price, discount_amount)
         tag = rvfm_tag(score)
         return f"{score} {tag}"
 
@@ -1448,10 +1491,140 @@ def rvfm_tag(rvfm_value):
         return "🟠 יקר יחסית"
     else:
         return "🔴 לא שווה"
+
+
+import numpy as np
+#0.2 Auto Sweet-Rich Fill
+@app.callback(
+    [
+        Output('sweet_score', 'value'),
+        Output('rich_score', 'value')
+    ],
+    [
+        Input('new-nose-dropdown', 'value'),
+        Input('new-palette-dropdown', 'value'),
+        Input('new-abv', 'value')
+    ],
+    prevent_initial_call=True
+)
+
+def sweet_rich_auto_fill(nose, palette, abv):
+
+    # ── Step 1: Merge & parse ──────────────────────────────────────────────────
+    raw_inputs = (nose or []) + (palette or [])
+    parsed_flavors = list({
+        f.strip()
+        for entry in raw_inputs
+        for f in entry.split(',')
+        if f.strip()
+    })
+
+    if not parsed_flavors:
+        return 0, 0
+
+    unique_flavor_count = len(parsed_flavors)
+
+    # ── Step 2: Filter flavor master ──────────────────────────────────────────
+    matched_df = flavors_df[flavors_df['flavor_name'].isin(parsed_flavors)].copy()
+
+    # Zero matches at all → unknown
+    if matched_df.empty:
+        return 'Unknown Flavors', 'Unknown Flavors'
     
-# ============================================================================
-# CALLBACKS - UPDATE TAB (CLEAN REWRITE)
-# ============================================================================
+    if not abv:
+        return 'ABV Missing','ABV Missing'
+
+    # Partial matches → silently skip unmatched, use only what exists
+    # unique_flavor_count stays as the full parsed list length (same as SQL COUNT DISTINCT)
+    
+    # ── Step 3: Raw averages ───────────────────────────────────────────────────
+    raw_richness    = matched_df['richness_score'].mean()
+    raw_smoky_sweet = matched_df['smoky_sweet_score'].mean()
+
+    # ── Step 4: Boolean flags ─────────────────────────────────────────────────
+    scores     = matched_df['richness_score'].to_numpy()
+    flavor_set = set(matched_df['flavor_name'])
+
+    rich          = np.where(scores == 8.0, True, False).any()
+    super_rich    = np.where(scores == 9.0, True, False).any()
+    rich_joker    = bool({'butterscotch', 'Marmalade'}                       & flavor_set)
+    bitter_flavor = bool({'Dark Chocolate', 'Coffee', 'Mocha', 'Tiramisu'}  & flavor_set)
+    light_smoke   = bool({'Minerals', 'Sulfur', 'Meaty', 'Chalk', 'Metalic'} & flavor_set)
+
+    # ── Step 5: PenalizedStats ────────────────────────────────────────────────
+    base_richness = (
+        (raw_richness * 0.7 if unique_flavor_count < 4 else raw_richness)
+        * (1.3  if rich        else 1.0)
+        * (1.55 if super_rich  else 1.0)
+        * (1.4  if rich_joker  else 1.0)
+    )
+    base_smoky_sweet = (
+        (raw_smoky_sweet * 0.7 if unique_flavor_count <= 4 else raw_smoky_sweet)
+        * (1.25 if bitter_flavor else 1.0)
+        * (1.4  if light_smoke   else 1.0)
+    )
+
+    # ── Step 6: ABV multipliers ────────────────────────────────────────────────
+    abv = float(abv) if abv else 0.0
+
+    if 40 <= abv <= 47.99:
+        final_richness = base_richness * 0.9
+    elif 48 <= abv <= 53.99:
+        final_richness = base_richness * 1.1
+    elif 54 <= abv <= 58.99:
+        final_richness = base_richness * 1.25
+    elif 59 <= abv <= 64.99:
+        final_richness = base_richness * 1.4
+    elif 65 <= abv <= 70.99:
+        final_richness = base_richness * 1.5
+    else:
+        final_richness = base_richness
+
+    if 40 <= abv <= 46.99:
+        final_smoky_sweet = base_smoky_sweet * 0.7
+    elif 47 <= abv <= 53.99:
+        final_smoky_sweet = base_smoky_sweet * 0.8 if base_smoky_sweet < 5 else base_smoky_sweet * 1.1
+    elif 54 <= abv <= 58.99:
+        final_smoky_sweet = base_smoky_sweet * 0.75 if base_smoky_sweet < 5 else base_smoky_sweet * 1.2
+    elif 59 <= abv <= 64.99:
+        final_smoky_sweet = base_smoky_sweet * 0.65 if base_smoky_sweet < 5 else base_smoky_sweet * 1.45
+    elif 65 <= abv <= 70.99:
+        final_smoky_sweet = base_smoky_sweet * 0.55 if base_smoky_sweet < 5 else base_smoky_sweet * 1.5
+    else:
+        final_smoky_sweet = base_smoky_sweet
+
+    def get_sweetness_label(score: float) -> str:
+        items = list(SWEETNESS_RANGES.items())
+        for i, (label, (low, high)) in enumerate(items):
+            # Use strict less-than on upper bound except for the last range
+            if i < len(items) - 1:
+                if low <= score < high:
+                    return label
+            else:
+                if low <= score <= high:
+                    return label
+        return "Out of range"
+    
+    def get_richness_label(score: float) -> str:
+        items = list(RICHNESS_RANGES.items())
+        for i, (label, (low, high)) in enumerate(items):
+            # Use strict less-than on upper bound except for the last range
+            if i < len(items) - 1:
+                if low <= score < high:
+                    return label
+            else:
+                if low <= score <= high:
+                    return label
+        return "Out of range"
+    
+    sweet_label = get_sweetness_label(final_smoky_sweet)
+    rich_label = get_richness_label(final_richness)
+    
+    final_sweet_label = f"{sweet_label} - {round(final_smoky_sweet,3)}"
+    final_rich_label = f"{rich_label} - {round(final_richness,3)}"
+    # ── Step 7: Round and return ───────────────────────────────────────────────
+    return final_sweet_label, final_rich_label
+    
 
 # 0.25 Auto Bottle Fill (FIXED: no accumulation, clears invalid value on distillery change)
 @app.callback(
