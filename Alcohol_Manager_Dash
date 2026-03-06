@@ -1596,9 +1596,8 @@ def sweet_rich_auto_fill(nose, palette, abv):
     def get_sweetness_label(score: float) -> str:
         items = list(SWEETNESS_RANGES.items())
         for i, (label, (low, high)) in enumerate(items):
-            # Use strict less-than on upper bound except for the last range
             if i < len(items) - 1:
-                if low <= score < high:
+                if low <= score <= high:  # שינוי: < הפך ל-<=
                     return label
             else:
                 if low <= score <= high:
@@ -1606,17 +1605,13 @@ def sweet_rich_auto_fill(nose, palette, abv):
         return "Out of range"
     
     def get_richness_label(score: float) -> str:
-        items = list(RICHNESS_RANGES.items())
-        for i, (label, (low, high)) in enumerate(items):
-            # Use strict less-than on upper bound except for the last range
-            if i < len(items) - 1:
-                if low <= score < high:
-                    return label
-            else:
-                if low <= score <= high:
-                    return label
+        for label, (low, high) in RICHNESS_RANGES.items():
+            if low <= score <= high:
+                return label
         return "Out of range"
     
+    print(final_smoky_sweet)
+    print(final_richness)
     sweet_label = get_sweetness_label(final_smoky_sweet)
     rich_label = get_richness_label(final_richness)
     
