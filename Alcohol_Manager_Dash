@@ -1547,8 +1547,8 @@ def sweet_rich_auto_fill(nose, palette, abv):
 
     rich          = np.where(scores == 8.0, True, False).any()
     super_rich    = np.where(scores == 9.0, True, False).any()
-    rich_joker    = bool({'butterscotch', 'Marmalade'}                       & flavor_set)
-    bitter_flavor = bool({'Dark Chocolate', 'Coffee', 'Mocha', 'Tiramisu'}  & flavor_set)
+    rich_joker    = bool({'butterscotch', 'Marmalade','Chocolate','Coffee','Espresso'}                       & flavor_set)
+    bitter_flavor = bool({'Dark Chocolate', 'Coffee', 'Mocha','Espresso', 'Tiramisu'}  & flavor_set)
     light_smoke   = bool({'Minerals', 'Sulfur', 'Meaty', 'Chalk', 'Metalic'} & flavor_set)
 
     # ── Step 5: PenalizedStats ────────────────────────────────────────────────
