@@ -94,7 +94,7 @@ SWEETNESS_RANGES = {
     'Very Sweet': (0, 1.5),
     'Sweet-Citrucy': (1.51, 2.0),
     'Citrucy-Spicy': (2.01, 2.749),
-    'Coffee Like- Sea Salt': (2.75, 4.0),
+    'Coffee Like - Sea Salt': (2.75, 4.0),
     'Minerals - Sulfur': (4.01, 5.5),
     'Ash - BBQ Smoke': (5.51, 7.5),
     'Heavy Peat - Medicinal Smoke': (7.51, 100.0)
@@ -109,6 +109,110 @@ RICHNESS_RANGES = {
     'Very Rich': (12.51, 17.5),
     'Syrup Like': (17.51, 100.0)
 }
+
+# ── Global flavor label + badge helpers (used across multiple callbacks) ────
+
+import math as _math
+import re as _re
+
+def _clamp(x, lo, hi):
+    return max(lo, min(hi, x))
+
+def _interp_hex(c1, c2, t):
+    c1, c2 = c1.lstrip('#'), c2.lstrip('#')
+    r1,g1,b1 = int(c1[0:2],16), int(c1[2:4],16), int(c1[4:6],16)
+    r2,g2,b2 = int(c2[0:2],16), int(c2[2:4],16), int(c2[4:6],16)
+    r = int(r1 + (r2-r1)*t)
+    g = int(g1 + (g2-g1)*t)
+    b = int(b1 + (b2-b1)*t)
+    return f'#{r:02x}{g:02x}{b:02x}'
+
+def _is_dark_bg(hex_color):
+    h = hex_color.lstrip('#')
+    r,g,b = int(h[0:2],16), int(h[2:4],16), int(h[4:6],16)
+    return (0.299*r + 0.587*g + 0.114*b) < 140
+
+def _lerp_color_by_stops(score, stops):
+    s = float(score)
+    if s <= stops[0][0]: return stops[0][1]
+    if s >= stops[-1][0]: return stops[-1][1]
+    for (v0,c0),(v1,c1) in zip(stops, stops[1:]):
+        if v0 <= s <= v1:
+            t = (s-v0)/(v1-v0) if v1 != v0 else 0.0
+            return _interp_hex(c0, c1, _clamp(t, 0.0, 1.0))
+    return stops[-1][1]
+
+def _safe_float(x):
+    if x is None: return None
+    try:
+        if isinstance(x, float) and _math.isnan(x): return None
+    except Exception: pass
+    if isinstance(x, (int, float)): return float(x)
+    nums = _re.findall(r"[-+]?\d*\.?\d+", str(x).strip())
+    return float(nums[-1]) if nums else None
+
+def get_sweetness_label(score: float) -> str:
+    items = list(SWEETNESS_RANGES.items())
+    for i, (label, (low, high)) in enumerate(items):
+        if low <= score <= high:
+            return label
+    return "Out of range"
+
+def get_richness_label(score: float) -> str:
+    for label, (low, high) in RICHNESS_RANGES.items():
+        if low <= score <= high:
+            return label
+    return "Out of range"
+
+def badge_style_sweet(score):
+    STOPS = [
+        (1.0,  "#ffb6c1"),
+        (1.9,  "#ffcccb"),
+        (2.3,  "#ffcc99"),
+        (2.7,  "#ffdb58"),
+        (3.9,  "#d4a017"),
+        (5.0,  "#228b22"),
+        (6.9,  "#a9a9a9"),
+        (10.9, "#444444"),
+    ]
+    s = _safe_float(score)
+    bg = _lerp_color_by_stops(s, STOPS) if s is not None else "#f8f9fa"
+    return {
+        "backgroundColor": bg,
+        "color": "#ffffff" if _is_dark_bg(bg) else "#000000",
+        "fontWeight": "700",
+        "borderRadius": "20px",
+        "padding": "4px 10px",
+        "display": "inline-block",
+        "whiteSpace": "nowrap",
+        "fontSize": "12px",
+    }
+
+def badge_style_rich(score):
+    STOPS = [
+        (5.5,  "#fff3a0"),
+        (7.8,  "#ffd54f"),
+        (8.4,  "#c07a2a"),
+        (10.1, "#a8621e"),
+        (10.3, "#9a5a1d"),
+        (12.4, "#8f4f1a"),
+        (12.8, "#7a3f15"),
+        (18.2, "#4a2a12"),
+        (35.6, "#2b160a"),
+    ]
+    s = _safe_float(score)
+    bg = _lerp_color_by_stops(s, STOPS) if s is not None else "#f8f9fa"
+    return {
+        "backgroundColor": bg,
+        "color": "#ffffff" if _is_dark_bg(bg) else "#000000",
+        "fontWeight": "700",
+        "borderRadius": "20px",
+        "padding": "4px 10px",
+        "display": "inline-block",
+        "whiteSpace": "nowrap",
+        "fontSize": "12px",
+    }
+
 
 
 # נגדיר את הסטייל כמשתנה כדי שהקוד למטה יישאר נקי
@@ -380,15 +484,18 @@ def get_history_as_df():
         return pd.DataFrame()
 
     query = f"""
-    SELECT bottle_id, update_time, stock_status_per, nose, palette, alc_pre, drams_counter
-    FROM `{HISTORY_TABLE_REF}`
+    SELECT h.update_id, h.bottle_id, h.update_time, h.stock_status_per, h.nose, h.palette, h.alc_pre, h.drams_counter, h.drinker_name
+    FROM `{HISTORY_TABLE_REF}` h
+    JOIN `{TABLE_REF}` w ON h.bottle_id = w.bottle_id
+    WHERE w.alcohol_type IN ('Single Malt Whisky', 'Blended Scotch Whisky')
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY h.update_id ORDER BY h.update_time) = 1
     """
 
     dfh = client.query(query).to_dataframe()
 
     # Normalize array columns to python lists
     import numpy as np
-    for col in ['nose', 'palette']:
+    for col in ['nose', 'palette', 'drinker_name']:
         if col in dfh.columns:
             dfh[col] = dfh[col].apply(lambda x: list(x) if isinstance(x, np.ndarray) else ([] if x is None else x))
 
@@ -501,6 +608,19 @@ app.layout = dbc.Container([
         dbc.ModalBody(id='validation_modal'),
 
     ], id="validation_toggle", is_open=False),
+
+    # Duplicate bottle confirmation modal
+    dbc.Modal([
+        dbc.ModalHeader(dbc.ModalTitle("⚠️ Duplicate Bottle Detected")),
+        dbc.ModalBody(id='duplicate-modal-body'),
+        dbc.ModalFooter([
+            dbc.Button("No, go back", id="duplicate-cancel-btn", color="secondary", className="ms-auto"),
+            dbc.Button("Yes, insert anyway", id="duplicate-confirm-btn", color="warning", n_clicks=0),
+        ]),
+    ], id="duplicate-modal", is_open=False),
+
+    # Store to hold pending insert args while waiting for duplicate confirmation
+    dcc.Store(id='pending-insert-store', storage_type='memory'),
 
     html.H1("🥃 Alcohol Manager v10.0 - Advanced AI & Filtering", className="my-4 text-center"),
     dbc.Alert(id='alert-output', is_open=False, duration=6000),
@@ -663,13 +783,107 @@ app.layout = dbc.Container([
                         ),
                         html.Hr(),
                         
-                        # Random Dram Generator
+                        # Random Dram Generator / Personalized Suggestion
                         dbc.Card([
-                            dbc.CardHeader("🎲 Random Dram Generator"),
+                            dbc.CardHeader("🎲 Dram Suggester"),
                             dbc.CardBody([
-                                html.P("Suggests a whisky you haven't drunk in > 7 days.", className="small text-muted"),
-                                dbc.Button("Suggest a Dram", id='btn-random-dram', color="dark", outline=True, className="w-100 mb-2"),
-                                html.Div(id='random-dram-output', className="text-center font-weight-bold text-primary")
+                                # Toggle
+                                dbc.RadioItems(
+                                    id='dram-mode-toggle',
+                                    options=[
+                                        {"label": "🎲 Random Dram", "value": "random"},
+                                        {"label": "🎯 Personalized", "value": "personalized"},
+                                    ],
+                                    value="random",
+                                    inline=True,
+                                    className="mb-3",
+                                    inputClassName="me-1",
+                                ),
+
+                                # Random mode
+                                html.Div(id='dram-random-section', children=[
+                                    html.P("Suggests a whisky you haven't drunk in > 7 days.", className="small text-muted mb-2"),
+                                    dbc.Button("Suggest a Dram", id='btn-random-dram', color="dark", outline=True, className="w-100 mb-2"),
+                                ]),
+
+                                # Personalized mode
+                                html.Div(id='dram-personalized-section', style={'display': 'none'}, children=[
+                                    html.P("Suggest based on past drinkers' taste profile.", className="small text-muted mb-2"),
+                                    dbc.Row([
+                                        dbc.Col([
+                                            dcc.Dropdown(
+                                                id='drinker-selector',
+                                                options=[],
+                                                multi=True,
+                                                placeholder="Select drinker(s)...",
+                                                style={'fontSize': '13px'},
+                                            ),
+                                            dbc.Input(
+                                                id='drinker-manual',
+                                                placeholder="Or type new name(s)...",
+                                                size="sm",
+                                                className="mt-2",
+                                                style={'display': 'none'},
+                                            ),
+                                        ], width=9),
+                                        dbc.Col([
+                                            dbc.Button(
+                                                "Suggest",
+                                                id='btn-personalized-dram',
+                                                color="success",
+                                                style={
+                                                    'borderRadius': '50px',
+                                                    'fontWeight': '600',
+                                                    'fontSize': '13px',
+                                                    'padding': '6px 14px',
+                                                    'whiteSpace': 'nowrap',
+                                                },
+                                                className="w-100",
+                                            )
+                                        ], width=3, className="d-flex align-items-start ps-0"),
+                                    ], className="align-items-start g-2"),
+                                ]),
+
+                                html.Div(id='random-dram-output', className="text-center font-weight-bold text-primary mt-2"),
+
+                                # Suggestion results table (personalized mode)
+                                dash_table.DataTable(
+                                    id='suggestion-top3-dt',
+                                    columns=[
+                                        {"name": "#",          "id": "medal"},
+                                        {"name": "Distillery", "id": "distillery"},
+                                        {"name": "Bottle",     "id": "bottle_name"},
+                                        {"name": "Status",     "id": "status"},
+                                        {"name": "Δ",          "id": "average_dis"},
+                                        {"name": "bottle_id",  "id": "bottle_id"},
+                                    ],
+                                    hidden_columns=["bottle_id"],
+                                    data=[],
+                                    page_action="none",
+                                    sort_action="none",
+                                    style_as_list_view=True,
+                                    style_table={"overflowX": "auto", "display": "none"},
+                                    style_cell={
+                                        "padding": "6px 8px",
+                                        "fontSize": "13px",
+                                        "border": "none",
+                                        "whiteSpace": "nowrap",
+                                    },
+                                    style_header={
+                                        "fontWeight": "700",
+                                        "borderBottom": "1px solid rgba(0,0,0,0.08)",
+                                        "fontSize": "12px",
+                                    },
+                                    style_data={
+                                        "borderBottom": "1px solid rgba(0,0,0,0.05)",
+                                        "cursor": "pointer",
+                                    },
+                                    style_data_conditional=[
+                                        {"if": {"state": "active"}, "backgroundColor": "#e8f5e9", "border": "none"},
+                                        {"if": {"row_index": 0}, "fontWeight": "600"},
+                                    ],
+                                ),
+                                html.Div(id='suggestion-top3-msg', className="text-muted mt-1", style={"fontSize": "12px"}),
                             ])
                         ], className="mb-3 border-dark"),
 
@@ -707,6 +921,24 @@ app.layout = dbc.Container([
                                     dbc.Col([dbc.Label("Pour (ml)"), dbc.Input(id='pour-size', type='number', value=30)], width=4),
                                     dbc.Col([dbc.Label("Glasses"), dbc.Input(id='glass-count', type='number', value=1)], width=4),
                                     dbc.Col([dbc.Label("Action"), dbc.Button("Drink!", id='btn-calculate-pour', color="warning", outline=True, className="w-100")], width=4),
+                                ], className="mb-2"),
+                                dbc.Row([
+                                    dbc.Col([
+                                        dbc.Label("🥃 Who's drinking?"),
+                                        dcc.Dropdown(
+                                            id='drinker-pour',
+                                            options=[],
+                                            multi=True,
+                                            placeholder="Select drinker(s)...",
+                                            style={'fontSize': '13px'},
+                                        ),
+                                        dbc.Input(
+                                            id='drinker-pour-manual',
+                                            placeholder="Or type new name(s), comma separated...",
+                                            size="sm",
+                                            className="mt-1",
+                                        ),
+                                    ]),
                                 ]),
                             ])
                         ], className="mb-3 bg-light"),
@@ -1031,7 +1263,7 @@ app.layout = dbc.Container([
                     dbc.Col([
                         dbc.Label("📊 Stock Level %"),
                         dbc.InputGroup([
-                            dbc.Input(id='search-stock-min', type='number', min=0, max=100, placeholder="Min"),
+                            dbc.Input(id='search-stock-min', type='number', min=0, max=100, placeholder="Min",value=1),
                             dbc.InputGroupText("-"),
                             dbc.Input(id='search-stock-max', type='number', min=0, max=100, placeholder="Max"),
                         ])
@@ -2421,11 +2653,25 @@ def load_bottle_data(bottle_id):
         pred_finish_str = _fmt_date(pred_finish)
         pred_txt  = f"Predicted finish: {pred_finish_str}"
         
-        badges = [
-            dbc.Badge(f"Total: {meta['vol']}ml", color="dark", className="mr-2"),
-            dbc.Badge(f"Current: {current_ml}ml", color="info"),
-             dbc.Badge(pred_txt, color="warning", className="me-2", pill=True),
-        ]
+        s_score    = _safe_float(r.get('final_smoky_sweet_score'))
+        r_score    = _safe_float(r.get('final_richness_score'))
+        sweet_lbl  = f"{get_sweetness_label(s_score)} - {round(s_score, 3)}" if s_score is not None else None
+        rich_lbl   = f"{get_richness_label(r_score)} - {round(r_score, 3)}"  if r_score is not None else None
+
+        flavor_spans = []
+        if sweet_lbl:
+            flavor_spans.append(html.Span(sweet_lbl, style={**badge_style_sweet(s_score), "marginRight": "6px"}))
+        if rich_lbl:
+            flavor_spans.append(html.Span(rich_lbl, style=badge_style_rich(r_score)))
+
+        badges = html.Div([
+            html.Div([
+                dbc.Badge(f"Total: {meta['vol']}ml", color="dark", className="me-2"),
+                dbc.Badge(f"Current: {current_ml}ml", color="info", className="me-2"),
+                dbc.Badge(pred_txt, color="warning", pill=True),
+            ], className="mb-2"),
+            html.Div(flavor_spans) if flavor_spans else None,
+        ])
 
         return meta, nose_opts, nose_values, palette_opts, palette_values, abv_value, badges
 
@@ -2598,6 +2844,25 @@ def select_bottle_from_bb_table(active_cell, data):
 
     return bid
 
+# 1.96 Select bottle from personalized suggestion table
+@app.callback(
+    Output("update-selector", "value", allow_duplicate=True),
+    Input("suggestion-top3-dt", "active_cell"),
+    State("suggestion-top3-dt", "data"),
+    prevent_initial_call=True
+)
+def select_bottle_from_suggestion_table(active_cell, data):
+    if not active_cell or not data:
+        return no_update
+    row = active_cell.get("row")
+    if row is None or row >= len(data):
+        return no_update
+    bid = data[row].get("bottle_id")
+    if not bid:
+        return no_update
+    return bid
+
+
 # 2. TOGGLE EDIT MODE
 @app.callback(
     [Output('upd-nose', 'disabled'),
@@ -2666,56 +2931,292 @@ def update_visuals(slider_val, meta, n_pour, pour_ml, glasses):
     return style, current_pct, display_text
 
 
-# 4. RANDOM DRAM GENERATOR
+# 4a. DRAM MODE TOGGLE – show/hide sections + clear output
+@app.callback(
+    [Output('dram-random-section', 'style'),
+     Output('dram-personalized-section', 'style'),
+     Output('random-dram-output', 'children', allow_duplicate=True),
+     Output('suggestion-top3-dt', 'data', allow_duplicate=True),
+     Output('suggestion-top3-dt', 'style_table', allow_duplicate=True),
+     Output('suggestion-top3-msg', 'children', allow_duplicate=True)],
+    Input('dram-mode-toggle', 'value'),
+    prevent_initial_call=True,
+)
+def toggle_dram_mode(mode):
+    _HIDE = {"overflowX": "auto", "display": "none"}
+    if mode == 'personalized':
+        return {'display': 'none'}, {'display': 'block'}, "", no_update, no_update, no_update
+    return {'display': 'block'}, {'display': 'none'}, "", [], _HIDE, ""
+
+
+# 4b-pour. LOAD DRINKERS INTO POUR DROPDOWN (loaded once on page/tab)
+@app.callback(
+    Output('drinker-pour', 'options'),
+    Input('update-selector', 'value'),
+)
+def load_drinkers_pour(bottle_id):
+    try:
+        query = f"""
+        SELECT DISTINCT name
+        FROM `{HISTORY_TABLE_REF}`, UNNEST(drinker_name) AS name
+        WHERE name IS NOT NULL AND TRIM(name) != ''
+        ORDER BY name
+        """
+        df = client.query(query).to_dataframe()
+        return [{"label": name, "value": name} for name in df["name"].tolist()]
+    except Exception:
+        return []
+
+
+# 4b. LOAD UNIQUE DRINKERS INTO DROPDOWN
+@app.callback(
+    Output('drinker-selector', 'options'),
+    Input('dram-mode-toggle', 'value'),
+)
+def load_drinkers(mode):
+    if mode != 'personalized':
+        return no_update
+    try:
+        query = f"""
+        SELECT DISTINCT name
+        FROM `{HISTORY_TABLE_REF}`, UNNEST(drinker_name) AS name
+        WHERE name IS NOT NULL AND TRIM(name) != ''
+        ORDER BY name
+        """
+        df = client.query(query).to_dataframe()
+        return [{"label": name, "value": name} for name in df["name"].tolist()]
+    except Exception as e:
+        return []
+
+
+
 @app.callback(
     [Output('random-dram-output', 'children'),
-     Output('update-selector', 'value')],
-    Input('btn-random-dram', 'n_clicks'),
+     Output('update-selector', 'value'),
+     Output('suggestion-top3-dt', 'data'),
+     Output('suggestion-top3-dt', 'style_table'),
+     Output('suggestion-top3-msg', 'children'),
+],
+    [Input('btn-random-dram', 'n_clicks'),
+     Input('btn-personalized-dram', 'n_clicks')],
+    [State('dram-mode-toggle', 'value'),
+     State('drinker-selector', 'value')],
     prevent_initial_call=True
 )
 
-def random_dram(n):
-    # NOTE: Must work from cached DF (no query per click)
-    if not n:
-        return no_update, no_update
+def random_dram(n_random, n_personal, mode, selected_drinkers):
+    triggered = ctx.triggered_id
+    _HIDE  = {"overflowX": "auto", "display": "none"}
+    _SHOW  = {"overflowX": "auto"}
+    NO5    = (no_update, no_update, no_update, no_update, no_update)
+    if not triggered:
+        return NO5
+
+    # ── PERSONALIZED MODE ──────────────────────────────────────────────────────
+    if triggered == 'btn-personalized-dram':
+        if not selected_drinkers:
+            return (dbc.Alert("Please select a drinker!", color="danger", className="mt-1 py-2 small"),
+                    no_update, [], _HIDE, "")
+
+        try:
+            df_all = get_all_data_as_df()
+            dfh    = get_history_as_df()
+
+            if df_all is None or df_all.empty or dfh is None or dfh.empty:
+                return (dbc.Alert("No data available.", color="warning", className="mt-1 py-2 small"),
+                        no_update, [], _HIDE, "")
+
+            # Step 1: taste profile — history filtered by drinker + 120 days
+            cutoff_120   = pd.Timestamp.now() - pd.Timedelta(days=120)
+            selected_set = set(selected_drinkers)
+
+            def _norm_ts(t):
+                t2 = pd.to_datetime(t)
+                try:
+                    if t2.tzinfo is not None:
+                        t2 = t2.replace(tzinfo=None)
+                except Exception:
+                    pass
+                return t2
+
+            mask_drinker = dfh['drinker_name'].apply(
+                lambda names: bool(selected_set & set(names)) if isinstance(names, list) else (names in selected_set)
+            )
+            mask_date    = dfh['update_time'].apply(lambda t: _norm_ts(t) >= cutoff_120 if pd.notna(t) else False)
+            dfh_filtered = dfh[mask_drinker & mask_date].drop_duplicates(subset=['bottle_id', 'update_time'])
+
+            if dfh_filtered.empty:
+                return (dbc.Alert("No drinking history found for selected drinker(s) in the last 120 days.",
+                                  color="warning", className="mt-1 py-2 small"),
+                        no_update, [], _HIDE, "")
+
+            flavor_cols = ['bottle_id', 'final_richness_score', 'final_smoky_sweet_score']
+            available   = [c for c in flavor_cols if c in df_all.columns]
+            # Keep update_time from history side before merging with catalogue
+            hist_cols = ['bottle_id', 'update_time'] + [c for c in ['final_richness_score', 'final_smoky_sweet_score'] if c in dfh_filtered.columns]
+            # Deduplicate df_all BEFORE merge to prevent row explosion from VIEW duplicates
+            df_all_dedup = df_all[available].groupby('bottle_id', as_index=False).first()
+            joined = dfh_filtered[['bottle_id', 'update_time']].drop_duplicates().merge(
+                df_all_dedup, on='bottle_id', how='inner'
+            )
+
+            # Drop non-whisky bottles (no flavor scores in VIEW)
+            joined = joined.dropna(subset=['final_richness_score', 'final_smoky_sweet_score'])
+
+            if joined.empty or 'final_richness_score' not in joined.columns:
+                return (dbc.Alert("Not enough flavor data to build taste profile.",
+                                  color="warning", className="mt-1 py-2 small"),
+                        no_update, [], _HIDE, "")
+
+            # ── Profile: Mode-of-category for richness, recent-60%-median for sweetness ──
+            # Normalize update_time (strip timezone) before sorting
+            joined['update_time'] = pd.to_datetime(joined['update_time']).apply(
+                lambda t: t.replace(tzinfo=None) if pd.notna(t) and hasattr(t, 'tzinfo') and t.tzinfo is not None else t
+            )
+            joined_sorted = joined.sort_values('update_time').reset_index(drop=True)
+            n_sessions    = len(joined_sorted)
+
+            # Richness: find most frequent category → use its center point
+            def _get_cat(val, ranges_dict):
+                for label, (lo, hi) in ranges_dict.items():
+                    if lo <= val <= hi:
+                        return label
+                return None
+
+            def _cat_center(label, ranges_dict):
+                lo, hi = ranges_dict[label]
+                hi = min(hi, 30.0)  # cap open-ended top bucket
+                return (lo + hi) / 2.0
+
+            joined_sorted['r_cat'] = joined_sorted['final_richness_score'].apply(
+                lambda v: _get_cat(v, RICHNESS_RANGES)
+            )
+            mode_r_cat = joined_sorted['r_cat'].value_counts().idxmax()
+            richness_avg = _cat_center(mode_r_cat, RICHNESS_RANGES)
+
+            # Sweetness: median of most recent 60% of sessions
+            cutoff_idx    = int(np.ceil(n_sessions * 0.4))
+            recent_joined = joined_sorted.iloc[cutoff_idx:]
+            sweet_smoke_avg = recent_joined['final_smoky_sweet_score'].median()
+
+            # Step 2: exclude bottles drunk in the last 21 days by selected drinkers
+            cutoff_21 = pd.Timestamp.now() - pd.Timedelta(days=21)
+            mask_recent = dfh['update_time'].apply(lambda t: _norm_ts(t) >= cutoff_21 if pd.notna(t) else False)
+            recently_drunk_ids = set(dfh[mask_drinker & mask_recent]['bottle_id'].tolist())
+
+            # Step 3: vectorised distance on full catalogue (exclude empty bottles)
+            catalogue = df_all.copy()
+            catalogue = catalogue[~catalogue['bottle_id'].isin(recently_drunk_ids)]
+            catalogue = catalogue.dropna(subset=['final_richness_score', 'final_smoky_sweet_score'])
+            catalogue = catalogue[catalogue['stock_status_per'].fillna(0) > 0]  # exclude empty
+
+            if catalogue.empty:
+                return (dbc.Alert("All bottles were drunk in the last 21 days!",
+                                  color="warning", className="mt-1 py-2 small"),
+                        no_update, [], _HIDE, "")
+
+            def _category_width(score, ranges_dict):
+                for label, (low, high) in ranges_dict.items():
+                    if low <= score <= high:
+                        return high - low
+                return 1.0
+
+            sweet_width = _category_width(sweet_smoke_avg, SWEETNESS_RANGES)
+            rich_width  = _category_width(richness_avg,    RICHNESS_RANGES)
+
+            catalogue['sweet_normalized'] = (catalogue['final_smoky_sweet_score'] - sweet_smoke_avg).abs() / sweet_width
+            catalogue['rich_normalized']  = (catalogue['final_richness_score']    - richness_avg).abs()    / rich_width
+
+            # Exponential penalty on sweetness (sensitive scale) + weighted sum
+            catalogue['average_dis'] = (
+                catalogue['sweet_normalized'] ** 2 * 0.7 +
+                catalogue['rich_normalized']        * 0.3
+            )
+
+            # Step 4: priority — open (< 100%) = 1, sealed = 2
+            catalogue['priority'] = np.where(catalogue['stock_status_per'].fillna(100) < 100, 1, 2)
+
+            # Step 5: pick Top 3 with open-first / fallback logic
+            open_sorted   = catalogue[catalogue['priority'] == 1].sort_values('average_dis')
+            closed_sorted = catalogue[catalogue['priority'] == 2].sort_values('average_dis')
+
+            FALLBACK_THRESHOLD = 2.5
+
+            if open_sorted.empty:
+                top3 = closed_sorted.head(3)
+            else:
+                best_open_dis = open_sorted.iloc[0]['average_dis']
+                if (not closed_sorted.empty) and (best_open_dis > FALLBACK_THRESHOLD):
+                    best_closed = closed_sorted.iloc[0]
+                    if best_closed['average_dis'] < best_open_dis:
+                        top3 = pd.concat([best_closed.to_frame().T, open_sorted.head(2)], ignore_index=True)
+                    else:
+                        top3 = open_sorted.head(3)
+                else:
+                    top3 = open_sorted.head(3)
+
+            # Step 6: build DataTable rows
+            medals = ["🥇", "🥈", "🥉"]
+            rows   = []
+            for i, (_, row) in enumerate(top3.iterrows()):
+                stock_pct  = row.get('stock_status_per', '?')
+                status_tag = "🟢 Open" if row.get('priority') == 1 else "🔒 Sealed"
+                rows.append({
+                    "medal":       medals[i] if i < len(medals) else str(i+1),
+                    "distillery":  row.get('distillery', ''),
+                    "bottle_name": row.get('bottle_name', ''),
+                    "status":      f"{status_tag} {stock_pct}%",
+                    "average_dis": f"{row['average_dis']:.2f}",
+                    "bottle_id":   int(row.get('bottle_id', 0)),
+                })
+
+            header = html.Small(
+                f"🎯 {', '.join(selected_drinkers)} | "
+                f"richness ≈ {richness_avg:.1f} ({mode_r_cat}) | smoky-sweet ≈ {sweet_smoke_avg:.2f}",
+                className="text-success"
+            )
+            return header, no_update, rows, _SHOW, "Click a row to load the bottle."
+
+        except Exception as e:
+            return (dbc.Alert(f"Error: {e}", color="danger", className="mt-1 py-2 small"),
+                    no_update, [], _HIDE, "")
+
+    # ── RANDOM MODE ────────────────────────────────────────────────────────────
+    if triggered == 'btn-random-dram' and not n_random:
+        return NO5
 
     df = get_all_data_as_df()
     if df is None or df.empty:
-        return "No cached data yet.", no_update
+        return "No cached data yet.", no_update, [], _HIDE, ""
 
     try:
         dfh = get_history_as_df()
+
+        now    = datetime.now()
+        cutoff = now - timedelta(days=7)
+
         last_sip = {}
         if dfh is not None and not dfh.empty:
-            # last update_time per bottle_id
             try:
-                grp = dfh.groupby("bottle_id")["update_time"].max()
+                grp      = dfh.groupby("bottle_id")["update_time"].max()
                 last_sip = grp.to_dict()
             except Exception:
                 pass
 
-        now = datetime.now()
-        cutoff = now - timedelta(days=7)
-
-        # eligibility filters (same logic as before)
         eligible = df.copy()
         if "stock_status_per" in eligible.columns:
             eligible = eligible[eligible["stock_status_per"].fillna(0) > 0]
-
         if "alcohol_type" in eligible.columns:
             eligible = eligible[eligible["alcohol_type"].isin(['Single Malt Whisky', 'Blended Scotch Whisky'])]
 
-        # last sip filter
         def ok_last(bid):
             t = last_sip.get(int(bid))
             if t is None or pd.isna(t):
                 return True
-            # BigQuery timestamps might be tz-aware pandas; normalize to naive UTC
             try:
                 t2 = pd.to_datetime(t).to_pydatetime()
             except Exception:
                 return True
-            # if tz aware convert
             try:
                 if getattr(t2, "tzinfo", None) is not None:
                     t2 = t2.astimezone(tz=None).replace(tzinfo=None)
@@ -2727,21 +3228,17 @@ def random_dram(n):
             eligible = eligible[eligible["bottle_id"].apply(ok_last)]
 
         if eligible.empty:
-            return "No eligible bottles!", no_update
+            return "No eligible bottles!", no_update, [], _HIDE, ""
 
-        choice = eligible.sample(1).iloc[0]
+        choice  = eligible.sample(1).iloc[0]
         display = html.Div([
             html.H5(f"🥃 {choice.get('distillery','')} - {choice.get('bottle_name','')}", className="mb-0"),
             html.Small(f"ID: {int(choice.get('bottle_id'))} | {choice.get('region','')}")
         ])
-
-        return display, int(choice.get("bottle_id"))
+        return display, int(choice.get("bottle_id")), [], _HIDE, ""
 
     except Exception as e:
-        return f"Error: {e}", no_update
-
-
-
+        return f"Error: {e}", no_update, [], _HIDE, ""
 # 5. SAVE UPDATE (Modal Confirmation with Validation)
 @app.callback(
     [Output('confirmation-modal', 'is_open'),
@@ -2757,10 +3254,12 @@ def random_dram(n):
      State('upd-abv', 'value'),
      State('upd-nose-manual', 'value'),
      State('upd-palette-manual', 'value'),
-     State('glass-count', 'value')]
+     State('glass-count', 'value'),
+     State('drinker-pour', 'value'),
+     State('drinker-pour-manual', 'value')]
 )
 
-def handle_save_modal(n_save, n_close, n_confirm, is_open, meta, stock, nose, palette, abv, nose_man, pal_man, glasses):
+def handle_save_modal(n_save, n_close, n_confirm, is_open, meta, stock, nose, palette, abv, nose_man, pal_man, glasses, drinkers, drinker_man):
     if not ctx.triggered_id or not meta:
         return False, ""
 
@@ -2823,6 +3322,11 @@ def handle_save_modal(n_save, n_close, n_confirm, is_open, meta, stock, nose, pa
             html.Small("Please make changes or cancel.", className="text-muted")
         ])
 
+    # Resolve drinkers for display
+    final_drinkers_display = list(drinkers) if drinkers else []
+    if drinker_man:
+        final_drinkers_display.extend([x.strip() for x in str(drinker_man).split(',') if x.strip()])
+
     # Summary
     summary = [
         html.H4(meta['name'], className="text-primary"),
@@ -2832,6 +3336,7 @@ def handle_save_modal(n_save, n_close, n_confirm, is_open, meta, stock, nose, pa
         html.P([html.B("Nose: "), ", ".join(final_nose) if final_nose else "No change"]),
         html.P([html.B("Palette: "), ", ".join(final_palette) if final_palette else "No change"]),
         html.P([html.B("Drams: "), f"{drams}"]),
+        html.P([html.B("Drinkers: "), ", ".join(final_drinkers_display) if final_drinkers_display else "—"]),
         html.Hr(),
         html.Small("⚠️ This will save changes permanently.", className="text-muted")
     ]
@@ -2860,10 +3365,12 @@ from google.cloud import bigquery
      State('upd-abv', 'value'),
      State('upd-nose-manual', 'value'),
      State('upd-palette-manual', 'value'),
-     State('glass-count', 'value')],
+     State('glass-count', 'value'),
+     State('drinker-pour', 'value'),
+     State('drinker-pour-manual', 'value')],
     prevent_initial_call=True
 )
-def execute_update(n, meta, stock, nose, palette, abv, nose_man, pal_man, glasses_cnt):
+def execute_update(n, meta, stock, nose, palette, abv, nose_man, pal_man, glasses_cnt, drinkers, drinker_man):
 
     if not n or not meta or not client:
         return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
@@ -2892,7 +3399,13 @@ def execute_update(n, meta, stock, nose, palette, abv, nose_man, pal_man, glasse
         sql_abv = float(abv) if abv is not None else float(meta['orig_abv'])
         drams_to_add = int(glasses_cnt or 0)
 
-        safe_name = str(meta['name']).replace("'", "\\'")
+        # Build drinker_name REPEATED STRING array
+        final_drinkers = list(drinkers) if drinkers else []
+        if drinker_man:
+            final_drinkers.extend([x.strip() for x in str(drinker_man).split(',') if x.strip()])
+        sql_drinkers = "[" + ", ".join(f"'{str(d).replace(chr(39), chr(92)+chr(39))}'" for d in final_drinkers) + "]" if final_drinkers else "[]"
+
+        safe_name = str(meta['name']).replace("'", "\'")
         bid = int(meta['bid'])
 
         sql = f"""
@@ -2966,7 +3479,8 @@ def execute_update(n, meta, stock, nose, palette, abv, nose_man, pal_man, glasse
             drams_counter,
             consumption_flag,
             depletion_flag,
-            forecasted_bottle_id
+            forecasted_bottle_id,
+            drinker_name
         )
         VALUES (
             (SELECT COALESCE(MAX(update_id), 0) + 1 FROM `{HISTORY_TABLE_REF}`),
@@ -2980,7 +3494,8 @@ def execute_update(n, meta, stock, nose, palette, abv, nose_man, pal_man, glasse
             {drams_to_add},
             consumption_flag_str,
             depletion_flag_str,
-            IF(consumption_match, forecasted_bid, NULL)
+            IF(consumption_match, forecasted_bid, NULL),
+            {sql_drinkers}
         );
         """
 
@@ -3110,7 +3625,12 @@ def ai_recommend(n):
      Output('new-stock-percent', 'value'),
      Output('new-bottle-count', 'value'),
      Output('new-rarity-dropdown', 'value'),
-     *[Output(f'new-{f}-dropdown', 'options') for f in DYNAMIC_FIELDS_BASE]],
+     *[Output(f'new-{f}-dropdown', 'options') for f in DYNAMIC_FIELDS_BASE],
+     Output('duplicate-modal', 'is_open'),
+     Output('duplicate-modal-body', 'children'),
+     Output('pending-insert-store', 'data'),
+     Output('validation_toggle', 'is_open', allow_duplicate=True),
+     Output('validation_modal', 'children', allow_duplicate=True)],
     Input('submit-new-btn', 'n_clicks'),
     [State(f'new-{f}-dropdown', 'value') for f in DYNAMIC_FIELDS_BASE] +
     [State(f'new-{f}-input', 'value') for f in DYNAMIC_FIELDS_BASE] +
@@ -3124,51 +3644,145 @@ def ai_recommend(n):
     prevent_initial_call=True
 )
 def insert_bottles(n, *args):
+    NO_CHANGE = (no_update, no_update, no_update, no_update,
+                 *[no_update]*len(DYNAMIC_FIELDS_BASE)*2,
+                 no_update, no_update, no_update, no_update,
+                 no_update, no_update, no_update, no_update, no_update,
+                 *[no_update]*len(DYNAMIC_FIELDS_BASE),
+                 False, no_update, no_update)
+
     if not n or not client:
         return no_update
-    
+
     num_dyn = len(DYNAMIC_FIELDS_BASE)
     dropdowns = args[:num_dyn]
-    inputs = args[num_dyn:num_dyn*2]
+    inputs    = args[num_dyn:num_dyn*2]
     age, abv, price, disc_price, limited, special, gift, discounted, purch, opening, stock, qty, rarity = args[num_dyn*2:]
-    
+
     def resolve(drop, inp, multi=False):
         if multi:
             if not drop: return []
             base = [v for v in drop if v != 'ADD_NEW_OPTION'] if 'ADD_NEW_OPTION' in drop else drop
             if inp:
                 base.extend([x.strip() for x in inp.split(',') if x.strip()])
-            return [str(x).replace("'", "\\'") for x in base]
+            return [str(x).replace("'", "\'") for x in base]
         val = inp if drop == 'ADD_NEW_OPTION' else drop
         if isinstance(val, str):
-            return val.replace("'", "\\'")
+            return val.replace("'", "\'")
         return val
-    
-    name = resolve(dropdowns[0], inputs[0])
-    if not name:
-        return "❌ Bottle name required", True, "danger", no_update, *[no_update]*43
-    
+
+    # ── FIELD VALIDATION ─────────────────────────────────────────────────────
+    REQUIRED = [
+        (resolve(dropdowns[0], inputs[0]),            "Bottle Name"),
+        (resolve(dropdowns[1], inputs[1]),            "Distillery"),
+        (abv,                                         "ABV %"),
+        (resolve(dropdowns[2], inputs[2]),            "Alcohol Type"),
+        (rarity,                                      "Rarity"),
+        (resolve(dropdowns[3], inputs[3]),            "Country"),
+        (resolve(dropdowns[4], inputs[4]),            "Region"),
+        (price,                                       "Initial Price"),
+        (resolve(dropdowns[5], inputs[5], True),      "Casks Aged In"),
+        (resolve(dropdowns[6], inputs[6], True),      "Nose"),
+        (resolve(dropdowns[7], inputs[7], True),      "Palette"),
+        (resolve(dropdowns[8], inputs[8]),            "Volume"),
+        (qty,                                         "Quantity"),
+        (limited,                                     "Limited Edition"),
+        (special,                                     "Special Bottling"),
+        (gift,                                        "Was a Gift"),
+    ]
+
+    missing = [label for val, label in REQUIRED if not val and val != 0 and val != False]
+    if missing:
+        val_msg = html.Div([
+            html.P("The following required fields are missing:", className="fw-bold mb-2"),
+            html.Ul([html.Li(f) for f in missing])
+        ])
+        return ("", False, "danger", no_update,
+                *[no_update]*num_dyn*2,
+                no_update, no_update, no_update, no_update,
+                no_update, no_update, no_update, no_update, no_update,
+                *[no_update]*num_dyn,
+                False, no_update, no_update,
+                True, val_msg)
+
+    name     = resolve(dropdowns[0], inputs[0])
+    distill  = resolve(dropdowns[1], inputs[1])
+
+    # ── DUPLICATE CHECK (uses cached DF — no BQ round-trip) ─────────────────
+    try:
+        df_all = get_all_data_as_df()
+        dup_count = 0
+        if df_all is not None and not df_all.empty:
+            dup_count = ((df_all['bottle_name'].str.lower() == name.lower()) &
+                         (df_all['distillery'].str.lower()  == distill.lower())).sum()
+        if dup_count > 0:
+            modal_msg = html.Div([
+                html.P([
+                    html.B(f"{distill} — {name}"),
+                    " already exists in the database."
+                ]),
+                html.P("Do you want to insert another copy anyway?", className="text-muted"),
+            ])
+            # Store all args for the confirmed insert
+            pending = {
+                "dropdowns": list(dropdowns),
+                "inputs":    list(inputs),
+                "age": age, "abv": abv, "price": price, "disc_price": disc_price,
+                "limited": limited, "special": special, "gift": gift,
+                "discounted": discounted, "purch": purch, "opening": opening,
+                "stock": stock, "qty": qty, "rarity": rarity,
+            }
+            return ("", False, "danger", no_update,
+                    *[no_update]*num_dyn*2,
+                    no_update, no_update, no_update, no_update,
+                    no_update, no_update, no_update, no_update, no_update,
+                    *[no_update]*num_dyn,
+                    True, modal_msg, pending,
+                    False, no_update)
+    except Exception:
+        pass  # if duplicate check fails, proceed with insert
+
+    # ── RUN INSERT ────────────────────────────────────────────────────────────
+    return _do_insert(dropdowns, inputs, age, abv, price, disc_price,
+                      limited, special, gift, discounted, purch, opening,
+                      stock, qty, rarity, num_dyn)
+
+
+def _do_insert(dropdowns, inputs, age, abv, price, disc_price,
+               limited, special, gift, discounted, purch, opening,
+               stock, qty, rarity, num_dyn):
+    """Shared insert logic used by both direct insert and duplicate-confirmed insert."""
+
+    def resolve(drop, inp, multi=False):
+        if multi:
+            if not drop: return []
+            base = [v for v in drop if v != 'ADD_NEW_OPTION'] if isinstance(drop, list) and 'ADD_NEW_OPTION' in drop else (drop or [])
+            if inp:
+                base.extend([x.strip() for x in inp.split(',') if x.strip()])
+            return [str(x).replace("'", "\'") for x in base]
+        val = inp if drop == 'ADD_NEW_OPTION' else drop
+        if isinstance(val, str):
+            return val.replace("'", "\'")
+        return val
+
     try:
         qty = int(qty or 1)
-        
-        # Build SQL
         sql = "BEGIN\nDECLARE start_id INT64;\n"
         sql += f"SET start_id = (SELECT COALESCE(MAX(bottle_id), 0) FROM `{TABLE_REF}`);\n"
-        
+
         for i in range(1, qty + 1):
-            curr_id = f"start_id + {i}"
-            
-            val_name = f"'{name}'"
+            curr_id  = f"start_id + {i}"
+            val_name = f"'{resolve(dropdowns[0], inputs[0])}'"
             val_dist = f"'{resolve(dropdowns[1], inputs[1]) or ''}'"
             val_type = f"'{resolve(dropdowns[2], inputs[2]) or ''}'"
             val_country = f"'{resolve(dropdowns[3], inputs[3]) or ''}'"
-            val_region = f"'{resolve(dropdowns[4], inputs[4]) or ''}'"
+            val_region  = f"'{resolve(dropdowns[4], inputs[4]) or ''}'"
             val_casks = list(resolve(dropdowns[5], inputs[5], True))
-            val_nose = list(resolve(dropdowns[6], inputs[6], True))
-            val_pal = list(resolve(dropdowns[7], inputs[7], True))
-            val_vol = resolve(dropdowns[8], inputs[8]) or 700
+            val_nose  = list(resolve(dropdowns[6], inputs[6], True))
+            val_pal   = list(resolve(dropdowns[7], inputs[7], True))
+            val_vol   = resolve(dropdowns[8], inputs[8]) or 700
             val_rarity = f"'{str(rarity).replace(chr(39), chr(92)+chr(39))}'" if rarity else 'NULL'
-            
+
             sql += f"""
             INSERT INTO `{TABLE_REF}`
             (bottle_id, bottle_name, distillery, alcohol_type, origin_country, region,
@@ -3185,35 +3799,93 @@ def insert_bottles(n, *args):
                 {str(discounted).lower()}, {resolve(dropdowns[9], inputs[9]) or 'NULL'},
                 {disc_price or 'NULL'}, CURRENT_TIMESTAMP(), {val_rarity}
             );
-            
+
             INSERT INTO `{HISTORY_TABLE_REF}`
-            (update_id, bottle_id, bottle_name, stock_status_per, update_time,nose, palette, alc_pre)
+            (update_id, bottle_id, bottle_name, stock_status_per, update_time, nose, palette, alc_pre)
             VALUES (
                 (SELECT COALESCE(MAX(update_id), 0) + 1 FROM `{HISTORY_TABLE_REF}`),
                 {curr_id}, {val_name}, {stock}, CURRENT_TIMESTAMP(),
                 {val_nose}, {val_pal}, {abv or 'NULL'}
             );
             """
-        
+
         sql += "END;"
-        
         client.query(sql).result()
-        
-        # Refresh
+
         new_list = fetch_bottle_list_optimized()
         new_opts = fetch_all_dropdown_data()
         opts_list = [new_opts.get(f, []) for f in DYNAMIC_FIELDS_BASE]
-        
         reset = [None]*(num_dyn*2) + [None, None, None, None, None, None, 100, 1, None]
-        
-        return f"✅ Added {qty} bottle(s)", True, "success", new_list, *reset, *opts_list
-        
+
+        return (f"✅ Added {qty} bottle(s)", True, "success", new_list,
+                *reset, *opts_list,
+                False, no_update, None,
+                False, no_update)
+
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return f"❌ Insert failed: {e}", True, "danger", no_update, *[no_update]*43
+        return (f"❌ Insert failed: {e}", True, "danger", no_update,
+                *[no_update]*num_dyn*2,
+                no_update, no_update, no_update, no_update,
+                no_update, no_update, no_update, no_update, no_update,
+                *[no_update]*num_dyn,
+                False, no_update, no_update,
+                False, no_update)
 
 
+# Duplicate confirmed — run insert from stored args
+@app.callback(
+    [Output('alert-output', 'children', allow_duplicate=True),
+     Output('alert-output', 'is_open', allow_duplicate=True),
+     Output('alert-output', 'color', allow_duplicate=True),
+     Output('update-selector', 'options', allow_duplicate=True),
+     *[Output(f'new-{f}-dropdown', 'value', allow_duplicate=True) for f in DYNAMIC_FIELDS_BASE],
+     *[Output(f'new-{f}-input', 'value', allow_duplicate=True) for f in DYNAMIC_FIELDS_BASE],
+     Output('new-age', 'value', allow_duplicate=True),
+     Output('new-abv', 'value', allow_duplicate=True),
+     Output('new-price', 'value', allow_duplicate=True),
+     Output('new-discounted-price', 'value', allow_duplicate=True),
+     Output('new-purchase_date', 'date', allow_duplicate=True),
+     Output('new-opening_date', 'date', allow_duplicate=True),
+     Output('new-stock-percent', 'value', allow_duplicate=True),
+     Output('new-bottle-count', 'value', allow_duplicate=True),
+     Output('new-rarity-dropdown', 'value', allow_duplicate=True),
+     *[Output(f'new-{f}-dropdown', 'options', allow_duplicate=True) for f in DYNAMIC_FIELDS_BASE],
+     Output('duplicate-modal', 'is_open', allow_duplicate=True),
+     Output('duplicate-modal-body', 'children', allow_duplicate=True),
+     Output('pending-insert-store', 'data', allow_duplicate=True),
+     Output('validation_toggle', 'is_open', allow_duplicate=True),
+     Output('validation_modal', 'children', allow_duplicate=True)],
+    [Input('duplicate-confirm-btn', 'n_clicks'),
+     Input('duplicate-cancel-btn', 'n_clicks')],
+    State('pending-insert-store', 'data'),
+    prevent_initial_call=True
+)
+def handle_duplicate_confirm(n_yes, n_no, pending):
+    num_dyn = len(DYNAMIC_FIELDS_BASE)
+    NO_CHANGE = ("", False, "danger", no_update,
+                 *[no_update]*num_dyn*2,
+                 no_update, no_update, no_update, no_update,
+                 no_update, no_update, no_update, no_update, no_update,
+                 *[no_update]*num_dyn,
+                 False, no_update, None,
+                 False, no_update)
+
+    if not ctx.triggered_id or not pending:
+        return NO_CHANGE
+
+    if ctx.triggered_id == 'duplicate-cancel-btn':
+        return NO_CHANGE
+
+    # Yes — run the insert
+    return _do_insert(
+        pending['dropdowns'], pending['inputs'],
+        pending['age'], pending['abv'], pending['price'], pending['disc_price'],
+        pending['limited'], pending['special'], pending['gift'], pending['discounted'],
+        pending['purch'], pending['opening'], pending['stock'], pending['qty'],
+        pending['rarity'], num_dyn
+    )
 # ============================================================================
 # CALLBACKS - SEARCH TAB
 # ============================================================================
