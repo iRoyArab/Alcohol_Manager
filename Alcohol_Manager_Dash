@@ -1,5 +1,6 @@
 import dash
 from dash import dcc, html, ctx, no_update, dash_table
+from dash.exceptions import PreventUpdate
 from dash.dependencies import Input, Output, State, ALL
 import dash_bootstrap_components as dbc
 from google.cloud import bigquery
@@ -452,6 +453,8 @@ def get_all_data_as_df():
     query = f"""
     SELECT t1.*, 
            t2.final_smoky_sweet_score, t2.final_richness_score,
+           t2.finish_strength_score, t2.Est_Finish_Strength,
+           t2.finish_length_score, t2.Est_Finish_Length,
             t3.avg_consumption_vol_per_day, t3.est_consumption_date, t3.predicted_finish_date, t3.Best_Before, t3.rvfm
     FROM `{TABLE_REF}` t1
     LEFT JOIN `{VIEW_REF}` t2 ON t1.bottle_name = t2.bottle_name AND t1.distillery = t2.distillery
@@ -511,7 +514,7 @@ def get_flavors_df():
 
     # השאילתה המלאה - מביאה את כל המידע בפעם אחת
     query = f"""
-    SELECT flavor_name, richness_score, smoky_sweet_score
+    SELECT flavor_name, richness_score, smoky_sweet_score, flavor_category
     FROM `{FLAVORS_REF}` t1
 
     """
@@ -725,6 +728,66 @@ app.layout = dbc.Container([
                                  
                 html.Hr(),
                 html.H5("Flavors & Aroma Profile", className="mb-3"),
+
+                # ── Aroma Wheel ──────────────────────────────────────────────
+                dbc.Row([
+                    dbc.Col([
+                        # Target toggles + inline legend
+                        html.Div([
+                            html.Span("Apply selection to:", className="me-2 fw-semibold", style={'fontSize': '0.9rem'}),
+                            dbc.Checklist(
+                                id='aroma-wheel-target',
+                                options=[
+                                    {'label': html.Span([
+                                        html.Span("👃 Nose", className="me-1"),
+                                        html.Span("", style={
+                                            'display': 'inline-block', 'width': '14px', 'height': '14px',
+                                            'backgroundColor': '#4C9BE8', 'borderRadius': '3px',
+                                            'verticalAlign': 'middle', 'marginLeft': '4px'
+                                        }),
+                                    ]), 'value': 'nose'},
+                                    {'label': html.Span([
+                                        html.Span("👅 Palate", className="me-1"),
+                                        html.Span("", style={
+                                            'display': 'inline-block', 'width': '14px', 'height': '14px',
+                                            'backgroundColor': '#A855F7', 'borderRadius': '3px',
+                                            'verticalAlign': 'middle', 'marginLeft': '4px'
+                                        }),
+                                    ]), 'value': 'palette'},
+                                ],
+                                value=['nose', 'palette'],
+                                inline=True,
+                                switch=True,
+                                className="d-inline-flex gap-4",
+                            ),
+                            html.Span([
+                                html.Span("", style={
+                                    'display': 'inline-block', 'width': '14px', 'height': '14px',
+                                    'backgroundColor': '#F59E0B', 'borderRadius': '3px',
+                                    'verticalAlign': 'middle', 'marginRight': '4px'
+                                }),
+                                html.Span("✓ Both", style={'fontSize': '0.85rem', 'color': '#666'}),
+                            ], className="ms-3 d-inline-flex align-items-center"),
+                        ], className="mb-3 d-flex align-items-center flex-wrap"),
+
+                        # Static graph — always in DOM so clickData callback works
+                        dcc.Loading(
+                            id='aroma-wheel-loading',
+                            type='circle',
+                            children=dcc.Graph(
+                                id='aroma-wheel-graph',
+                                figure={},
+                                config={'displayModeBar': False},
+                                style={'height': '820px'},
+                            )
+                        ),
+
+                        # Hidden store
+                        dcc.Store(id='aroma-wheel-selected', data={}),
+                    ], width=12),
+                ], className="mb-3"),
+
+                # ── Dropdowns row ─────────────────────────────────────────────
                 dbc.Row([
                     create_dynamic_input('new-casks_aged_in', "Casks", True),
                     create_dynamic_input('new-nose', "Nose", True),
@@ -734,13 +797,21 @@ app.layout = dbc.Container([
                 dbc.Row([
                     dbc.Col([
                         dbc.Label("Predicted Sweetness Score"),
-                        dbc.Input(id='sweet_score', type='text', disabled=True,style={'width':300,'font-weight':'bold','border-radius':50})
-                    ]),
+                        dbc.Input(id='sweet_score', type='text', disabled=True, style={'width': '100%', 'font-weight': 'bold', 'border-radius': 50})
+                    ], width=3),
                     dbc.Col([
                         dbc.Label("Predicted Richness Score"),
-                        dbc.Input(id='rich_score', type='text', disabled=True,style={'width':300,'font-weight':'bold','border-radius':50})
-                    ]),
-                ], className="mb-2"),
+                        dbc.Input(id='rich_score', type='text', disabled=True, style={'width': '100%', 'font-weight': 'bold', 'border-radius': 50})
+                    ], width=3),
+                    dbc.Col([
+                        dbc.Label("Predicted Finish Strength"),
+                        dbc.Input(id='finish_strength_score', type='text', disabled=True, style={'width': '100%', 'font-weight': 'bold', 'border-radius': 50})
+                    ], width=3),
+                    dbc.Col([
+                        dbc.Label("Predicted Finish Length"),
+                        dbc.Input(id='finish_length_score', type='text', disabled=True, style={'width': '100%', 'font-weight': 'bold', 'border-radius': 50})
+                    ], width=3),
+                ], className="mb-2 g-2"),
                 html.Hr(),
                 html.H5("Details & Inventory", className="mb-3"),
                 dbc.Row([
@@ -1680,6 +1751,341 @@ def compute_rvfm(age, abv, rarity, price, dprice=None):
     return round(max(0.0, min(10.0, score)), 2)
 
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AROMA WHEEL — Plotly polar bar chart (interactive)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Category order around the wheel (clockwise)
+CAT_ORDER = [
+    'Sweet & Dessert',
+    'Fruits',
+    'Floral',
+    'Spices & Herbs',
+    'Nuts',
+    'Coffee & Mocha',
+    'Wine & Sherry',
+    'Earthy, Wood & Smoke',
+]
+
+# Sort direction within each category:
+# 'asc'  = light → rich (richness ascending)
+# 'desc' = rich → light (richness descending)
+# Alternating so adjacent categories connect smoothly (wave effect)
+CAT_SORT = {
+    'Sweet & Dessert':      'asc',   # ends rich (Chocolate) → connects to Fruits which starts rich
+    'Fruits':               'desc',  # starts rich (Figs), ends light (Green Apples)
+    'Floral':               'asc',   # starts light (Flowers), ends rich (Orange Blossom)
+    'Spices & Herbs':       'desc',  # starts rich (Pepper), ends light (Mint)
+    'Nuts':                 'asc',   # starts light (Coconut), ends rich (Chestnuts)
+    'Coffee & Mocha':       'desc',  # starts rich (Mocha), ends light (Coffee)
+    'Wine & Sherry':        'asc',   # starts light (White Wine), ends rich (Sherry)
+    'Earthy, Wood & Smoke': 'desc',  # starts rich (Oak/Tabac), ends light (Minerals)
+}
+
+# Color stops — same palette used elsewhere in the app (smoky_sweet badge)
+_WHEEL_COLOR_STOPS = [
+    (1.0,  "#ffb6c1"),
+    (1.9,  "#ffcccb"),
+    (2.3,  "#ffcc99"),
+    (2.7,  "#ffdb58"),
+    (3.9,  "#d4a017"),
+    (5.0,  "#228b22"),
+    (6.9,  "#a9a9a9"),
+    (10.9, "#444444"),
+]
+
+def _wheel_cat_color(cat: str) -> str:
+    """Map category to a color by spreading CAT_ORDER evenly across the stop range."""
+    n = len(CAT_ORDER)
+    try:
+        idx = CAT_ORDER.index(cat)
+    except ValueError:
+        return '#6c757d'
+    score = _WHEEL_COLOR_STOPS[0][0] + (idx / max(n - 1, 1)) * (
+        _WHEEL_COLOR_STOPS[-1][0] - _WHEEL_COLOR_STOPS[0][0]
+    )
+    return _lerp_color_by_stops(score, _WHEEL_COLOR_STOPS)
+
+# Pre-build lookup dict
+CATEGORY_COLORS = {cat: _wheel_cat_color(cat) for cat in CAT_ORDER}
+_DEFAULT_CATEGORY_COLOR = '#6c757d'
+
+def get_category_color_by_name(category: str) -> str:
+    return CATEGORY_COLORS.get(category, _DEFAULT_CATEGORY_COLOR)
+
+def build_aroma_wheel_figure(flavors, nose_selected, palette_selected):
+    """
+    Clean aroma wheel:
+    - No individual flavor names on the wheel
+    - Category labels only around the perimeter, positioned next to their flavors
+    - Full flavor name + category shown on hover
+    - Tri-color selection: blue=nose, purple=palette, gold=both
+    - Category derived from flavor_category field (flavor_master_mapping)
+    """
+    import plotly.graph_objects as go
+    import math
+
+    if not flavors:
+        return go.Figure()
+
+    nose_set     = set(nose_selected or [])
+    palette_set  = set(palette_selected or [])
+    both_set     = nose_set & palette_set
+    nose_only    = nose_set - both_set
+    palette_only = palette_set - both_set
+    all_selected = nose_set | palette_set
+
+    # Group by category, sort within each group by richness per CAT_SORT direction,
+    # then assemble in CAT_ORDER → creates the wave effect between categories
+    from collections import defaultdict as _dd
+    _cat_buckets = _dd(list)
+    for f in flavors:
+        _cat_buckets[f.get('flavor_category', '')].append(f)
+
+    for cat in _cat_buckets:
+        reverse = CAT_SORT.get(cat, 'asc') == 'desc'
+        _cat_buckets[cat].sort(key=lambda x: x.get('richness_score', 5), reverse=reverse)
+
+    flavors_sorted = []
+    for cat in CAT_ORDER:
+        flavors_sorted.extend(_cat_buckets.get(cat, []))
+    # append any unknown categories at the end
+    for cat, fs in _cat_buckets.items():
+        if cat not in CAT_ORDER:
+            flavors_sorted.extend(fs)
+    n = len(flavors_sorted)
+    if n == 0:
+        return go.Figure()
+
+    angle_step = 360 / n
+    thetas   = [i * angle_step for i in range(n)]
+    widths   = [angle_step * 0.82] * n
+    names    = [f['flavor_name'] for f in flavors_sorted]
+    richness = [max(2.0, f.get('richness_score', 5)) for f in flavors_sorted]
+    smoky    = [f.get('smoky_sweet_score', 5) for f in flavors_sorted]
+    cats     = [f.get('flavor_category', '') for f in flavors_sorted]
+
+    # Selection colors
+    SEL_NOSE    = '#4C9BE8'
+    SEL_PALETTE = '#A855F7'
+    SEL_BOTH    = '#F59E0B'
+
+    def get_bar_color(name, cat):
+        if name in both_set:     return SEL_BOTH
+        if name in nose_only:    return SEL_NOSE
+        if name in palette_only: return SEL_PALETTE
+        return get_category_color_by_name(cat)
+
+    colors      = [get_bar_color(nm, cat) for nm, cat in zip(names, cats)]
+    line_colors = ['#92600A' if nm in both_set else
+                   '#1a5fa8' if nm in nose_only else
+                   '#6b21a8' if nm in palette_only else
+                   'rgba(255,255,255,0.4)' for nm in names]
+    line_widths = [2.5 if nm in all_selected else 0.5 for nm in names]
+
+    # Hover: show name + category
+    hover_texts = [
+        f'<b>{nm}</b><br>Category: {cat}<br>Richness: {r:.0f}/10'
+        for nm, cat, r in zip(names, cats, richness)
+    ]
+
+    fig = go.Figure()
+
+    # ── Main bars ─────────────────────────────────────────────────────────────
+    fig.add_trace(go.Barpolar(
+        r=richness,
+        theta=thetas,
+        width=widths,
+        marker=dict(
+            color=colors,
+            line=dict(color=line_colors, width=line_widths),
+            opacity=[1.0 if nm in all_selected else 0.85 for nm in names],
+        ),
+        customdata=list(zip(names, cats)),
+        hovertemplate='%{text}<extra></extra>',
+        text=hover_texts,
+        name='',
+    ))
+
+    # ── Glow ring for selected ────────────────────────────────────────────────
+    for sel_set, glow_fill, glow_border in [
+        (both_set,    'rgba(245,158,11,0.25)', '#F59E0B'),
+        (nose_only,   'rgba(76,155,232,0.25)', '#4C9BE8'),
+        (palette_only,'rgba(168,85,247,0.25)', '#A855F7'),
+    ]:
+        if sel_set:
+            s_idx    = [i for i, nm in enumerate(names) if nm in sel_set]
+            s_thetas = [thetas[i] for i in s_idx]
+            s_r      = [richness[i] + 1.4 for i in s_idx]
+            s_names  = [names[i] for i in s_idx]
+            s_cats   = [cats[i] for i in s_idx]
+            s_hover  = [f'<b>{nm}</b> ✓<br>{cat}' for nm, cat in zip(s_names, s_cats)]
+            fig.add_trace(go.Barpolar(
+                r=s_r,
+                theta=s_thetas,
+                width=[angle_step * 0.82] * len(s_thetas),
+                marker=dict(color=glow_fill, line=dict(color=glow_border, width=1.5)),
+                hovertemplate='%{text}<extra></extra>',
+                text=s_hover,
+                name='',
+            ))
+
+    # ── Category labels positioned at the angular midpoint of their flavors ───
+    # Group the actual theta angles of each flavor by its flavor_category
+    cat_groups = {}
+    for i, cat in enumerate(cats):
+        if not cat:
+            continue
+        cat_groups.setdefault(cat, []).append(thetas[i])
+
+    annotations = []
+
+    max_r = max(richness) if richness else 10
+    radial_range_max = max_r + 1.5
+    wheel_half = 0.44  # paper-coord half-radius of the polar area
+
+    for cat, angles in cat_groups.items():
+        mid_angle = (min(angles) + max(angles)) / 2
+        mid_rad   = math.radians(mid_angle - 90)
+        label_r   = wheel_half * (radial_range_max / (radial_range_max + 1.8))
+        annotations.append(dict(
+            x=0.5 + label_r * math.cos(mid_rad),
+            y=0.5 - label_r * math.sin(mid_rad),
+            xref='paper', yref='paper',
+            text=f'<b>{cat}</b>',
+            showarrow=False,
+            font=dict(size=18, family='Segoe UI Black, Arial Black, sans-serif',
+                      color=get_category_color_by_name(cat)),
+            bgcolor='rgba(255,255,255,0.88)',
+            borderpad=4,
+            xanchor='center',
+            yanchor='middle',
+        ))
+
+    # ── No legend in figure — handled by toggles in layout ───────────────────
+    shapes = []
+
+    fig.update_layout(
+        polar=dict(
+            radialaxis=dict(visible=False, range=[0, radial_range_max]),
+            angularaxis=dict(
+                tickmode='array',
+                tickvals=[],
+                ticktext=[],
+                direction='clockwise',
+                rotation=90,
+            ),
+            bgcolor='#f8f9fa',
+            hole=0.07,
+            domain=dict(x=[0.04, 0.96], y=[0.04, 0.96]),
+        ),
+        showlegend=False,
+        margin=dict(l=20, r=20, t=20, b=20),
+        height=820,
+        paper_bgcolor='white',
+        plot_bgcolor='white',
+        clickmode='event',
+        shapes=shapes,
+        annotations=annotations,
+    )
+
+    return fig
+
+
+# ── Callback 1: Update wheel figure ──────────────────────────────────────────
+@app.callback(
+    Output('aroma-wheel-graph', 'figure'),
+    [
+        Input('new-nose-dropdown', 'value'),
+        Input('new-palette-dropdown', 'value'),
+        Input('aroma-wheel-target', 'value'),
+    ],
+    prevent_initial_call=False
+)
+def render_aroma_wheel(nose_vals, palette_vals, targets):
+    nose_sel = set()
+    for v in (nose_vals or []):
+        for part in str(v).split(','):
+            s = part.strip()
+            if s: nose_sel.add(s)
+
+    palette_sel = set()
+    for v in (palette_vals or []):
+        for part in str(v).split(','):
+            s = part.strip()
+            if s: palette_sel.add(s)
+
+    flavors = flavors_df[['flavor_name', 'richness_score', 'smoky_sweet_score', 'flavor_category']].to_dict('records')
+    return build_aroma_wheel_figure(flavors, list(nose_sel), list(palette_sel))
+
+
+# ── Callback 2: Click on wheel → update nose/palette dropdowns ───────────────
+@app.callback(
+    [
+        Output('new-nose-dropdown', 'value', allow_duplicate=True),
+        Output('new-nose-dropdown', 'options', allow_duplicate=True),
+        Output('new-palette-dropdown', 'value', allow_duplicate=True),
+        Output('new-palette-dropdown', 'options', allow_duplicate=True),
+    ],
+    Input('aroma-wheel-graph', 'clickData'),
+    [
+        State('aroma-wheel-target', 'value'),
+        State('new-nose-dropdown', 'value'),
+        State('new-nose-dropdown', 'options'),
+        State('new-palette-dropdown', 'value'),
+        State('new-palette-dropdown', 'options'),
+    ],
+    prevent_initial_call=True
+)
+def handle_wheel_click(click_data, targets, nose_val, nose_opts, pal_val, pal_opts):
+    if not click_data:
+        raise PreventUpdate
+
+    try:
+        # customdata is (name, category) tuple
+        cd = click_data['points'][0]['customdata']
+        clicked_flavor = cd[0] if isinstance(cd, (list, tuple)) else cd
+    except (KeyError, IndexError, TypeError):
+        raise PreventUpdate
+
+    if not clicked_flavor:
+        raise PreventUpdate
+
+    targets = targets or []
+
+    def ensure_option(opts, flavor):
+        opts = list(opts or [])
+        existing = {o['value'] for o in opts}
+        if flavor not in existing:
+            opts.append({'label': flavor, 'value': flavor})
+        return opts
+
+    new_nose_val  = list(nose_val or [])
+    new_nose_opts = list(nose_opts or [])
+    new_pal_val   = list(pal_val or [])
+    new_pal_opts  = list(pal_opts or [])
+
+    currently_in_nose    = clicked_flavor in new_nose_val
+    currently_in_palette = clicked_flavor in new_pal_val
+
+    if 'nose' in targets:
+        new_nose_opts = ensure_option(new_nose_opts, clicked_flavor)
+        if currently_in_nose:
+            new_nose_val.remove(clicked_flavor)
+        else:
+            new_nose_val.append(clicked_flavor)
+
+    if 'palette' in targets:
+        new_pal_opts = ensure_option(new_pal_opts, clicked_flavor)
+        if currently_in_palette:
+            new_pal_val.remove(clicked_flavor)
+        else:
+            new_pal_val.append(clicked_flavor)
+
+    return new_nose_val, new_nose_opts, new_pal_val, new_pal_opts
+
+
 @app.callback(
     Output('rvfm_score', 'value'),
     [
@@ -1701,7 +2107,7 @@ def rvfm_auto_value(nage, nabv, nrar, ntype, price, discount_amount):
             discounted_price = float(price) - da if da > 0 else None
         except (TypeError, ValueError):
             discounted_price = None
-        print(f"DEBUG: price={price}, discount_amount={discount_amount!r}, discounted_price={discounted_price}")
+
         score = compute_rvfm(nage, nabv, nrar, price, discount_amount)
         tag = rvfm_tag(score)
         return f"{score} {tag}"
@@ -1730,17 +2136,46 @@ import numpy as np
 @app.callback(
     [
         Output('sweet_score', 'value'),
-        Output('rich_score', 'value')
+        Output('rich_score', 'value'),
+        Output('finish_strength_score', 'value'),
+        Output('finish_length_score', 'value')
     ],
     [
         Input('new-nose-dropdown', 'value'),
         Input('new-palette-dropdown', 'value'),
-        Input('new-abv', 'value')
+        Input('new-abv', 'value'),
+        Input('new-bottle_name-dropdown', 'value'),
+        Input('new-distillery-dropdown', 'value')
     ],
     prevent_initial_call=True
 )
 
-def sweet_rich_auto_fill(nose, palette, abv):
+def sweet_rich_auto_fill(nose, palette, abv, bottle_name, distillery):
+
+    # ── Step 0: Check if bottle exists in DF (pull scores directly) ────────────
+    try:
+        all_df = get_all_data_as_df()
+        if bottle_name and distillery and not all_df.empty:
+            match = all_df[
+                (all_df['bottle_name'] == bottle_name) &
+                (all_df['distillery'] == distillery)
+            ]
+            if not match.empty:
+                row = match.iloc[0]
+                s_score = row.get('final_smoky_sweet_score') if hasattr(row, 'get') else row['final_smoky_sweet_score']
+                r_score = row.get('final_richness_score') if hasattr(row, 'get') else row['final_richness_score']
+                fs_score = row.get('finish_strength_score') if hasattr(row, 'get') else row['finish_strength_score']
+                fl_score = row.get('finish_length_score') if hasattr(row, 'get') else row['finish_length_score']
+                fs_label = row.get('Est_Finish_Strength') if hasattr(row, 'get') else row['Est_Finish_Strength']
+                fl_label = row.get('Est_Finish_Length') if hasattr(row, 'get') else row['Est_Finish_Length']
+
+                sweet_out = f"{get_sweetness_label(float(s_score))} - {round(float(s_score), 3)}" if s_score is not None else None
+                rich_out  = f"{get_richness_label(float(r_score))} - {round(float(r_score), 3)}" if r_score is not None else None
+                fs_out    = f"{fs_label} - {round(float(fs_score), 3)}" if fs_score is not None and fs_label else None
+                fl_out    = f"{fl_label} - {round(float(fl_score), 3)}" if fl_score is not None and fl_label else None
+                return sweet_out, rich_out, fs_out, fl_out
+    except Exception:
+        pass
 
     # ── Step 1: Merge & parse ──────────────────────────────────────────────────
     raw_inputs = (nose or []) + (palette or [])
@@ -1752,7 +2187,7 @@ def sweet_rich_auto_fill(nose, palette, abv):
     })
 
     if not parsed_flavors:
-        return 0, 0
+        return 0, 0, None, None
 
     unique_flavor_count = len(parsed_flavors)
 
@@ -1761,10 +2196,10 @@ def sweet_rich_auto_fill(nose, palette, abv):
 
     # Zero matches at all → unknown
     if matched_df.empty:
-        return 'Unknown Flavors', 'Unknown Flavors'
+        return 'Unknown Flavors', 'Unknown Flavors', None, None
     
     if not abv:
-        return 'ABV Missing','ABV Missing'
+        return 'ABV Missing', 'ABV Missing', None, None
 
     # Partial matches → silently skip unmatched, use only what exists
     # unique_flavor_count stays as the full parsed list length (same as SQL COUNT DISTINCT)
@@ -1842,15 +2277,76 @@ def sweet_rich_auto_fill(nose, palette, abv):
                 return label
         return "Out of range"
     
-    print(final_smoky_sweet)
-    print(final_richness)
+
     sweet_label = get_sweetness_label(final_smoky_sweet)
     rich_label = get_richness_label(final_richness)
     
     final_sweet_label = f"{sweet_label} - {round(final_smoky_sweet,3)}"
     final_rich_label = f"{rich_label} - {round(final_richness,3)}"
-    # ── Step 7: Round and return ───────────────────────────────────────────────
-    return final_sweet_label, final_rich_label
+
+    # ── Step 7: Finish scores (normalized against DF range) ───────────────────
+    try:
+        all_df = get_all_data_as_df()
+        if not all_df.empty and 'final_richness_score' in all_df.columns:
+            min_r = all_df['final_richness_score'].min()
+            max_r = all_df['final_richness_score'].max()
+            norm_richness = (final_richness - min_r) / (max_r - min_r) * 9 + 1 if max_r != min_r else 5.0
+        else:
+            norm_richness = final_richness
+    except Exception:
+        norm_richness = final_richness
+
+    # Raw finish scores
+    finish_strength_raw = (
+        (norm_richness * 0.6)
+        + (abs(final_smoky_sweet - 5) * 0.4)
+        + (float(abv) - 40) * 0.05
+        + np.log(unique_flavor_count + 1) * 0.3
+    )
+    finish_length_raw = (
+        (norm_richness * 0.7)
+        + (max(final_smoky_sweet - 5, 0) * 0.5)
+        - (max(5 - final_smoky_sweet, 0) * 0.2)
+        + (float(abv) - 40) * 0.03
+        + np.log(unique_flavor_count + 1) * 0.6
+    )
+
+    # Normalize finish scores against DF ranges
+    try:
+        if not all_df.empty and 'finish_strength_score' in all_df.columns:
+            min_fs = all_df['finish_strength_score'].min()
+            max_fs = all_df['finish_strength_score'].max()
+            min_fl = all_df['finish_length_score'].min()
+            max_fl = all_df['finish_length_score'].max()
+            finish_strength_norm = (finish_strength_raw - min_fs) / (max_fs - min_fs) * 9 + 1 if max_fs != min_fs else 5.0
+            finish_length_norm   = (finish_length_raw  - min_fl) / (max_fl - min_fl) * 9 + 1 if max_fl != min_fl else 5.0
+        else:
+            finish_strength_norm = max(1, min(10, finish_strength_raw))
+            finish_length_norm   = max(1, min(10, finish_length_raw))
+    except Exception:
+        finish_strength_norm = max(1, min(10, finish_strength_raw))
+        finish_length_norm   = max(1, min(10, finish_length_raw))
+
+    finish_strength_norm = round(max(1.0, min(10.0, finish_strength_norm)), 3)
+    finish_length_norm   = round(max(1.0, min(10.0, finish_length_norm)), 3)
+
+    def get_finish_strength_label(score: float) -> str:
+        if score >= 9:   return 'Intense'
+        elif score >= 7: return 'Strong'
+        elif score >= 4: return 'Medium'
+        else:            return 'Light'
+
+    def get_finish_length_label(score: float) -> str:
+        if score >= 9:   return 'Endless'
+        elif score >= 7: return 'Long'
+        elif score >= 4: return 'Medium'
+        else:            return 'Short'
+
+    final_strength_label = f"{get_finish_strength_label(finish_strength_norm)} - {finish_strength_norm}"
+    final_length_label   = f"{get_finish_length_label(finish_length_norm)} - {finish_length_norm}"
+
+    # ── Step 8: Round and return ───────────────────────────────────────────────
+    return final_sweet_label, final_rich_label, final_strength_label, final_length_label
     
 
 # 0.25 Auto Bottle Fill (FIXED: no accumulation, clears invalid value on distillery change)
@@ -2149,7 +2645,58 @@ def master_callback(
             bottle_name = new_bottle_add
         
         if distillery == "ADD_NEW_OPTION":
-            distillery = new_distillery_add        
+            distillery = new_distillery_add
+
+        # ── DB Lookup: check if bottle already exists under this distillery ──
+        try:
+            existing_df = get_all_data_as_df()
+            match = existing_df[
+                (existing_df['bottle_name'].str.strip().str.lower() == bottle_name.strip().lower()) &
+                (existing_df['distillery'].str.strip().str.lower() == distillery.strip().lower())
+            ]
+            if not match.empty:
+                row = match.iloc[0]
+
+                db_casks  = _clean_list(row.get('casks_aged_in', []))
+                db_nose   = _clean_list(row.get('nose', []))
+                db_palate = _clean_list(row.get('palette', []))
+
+                new_cask_options   = _merge_options(cask_options, db_casks)
+                new_nose_options   = _merge_options(nose_options, db_nose)
+                new_palate_options = _merge_options(palate_options, db_palate)
+
+                db_country = row.get('origin_country')
+                db_region  = row.get('region')
+                db_vol     = str(row.get('original_volume')) if row.get('original_volume') is not None else None
+
+                if db_country and countries_option is not None:
+                    if db_country.lower() not in {str(o.get('value','')).strip().lower() for o in countries_option if isinstance(o, dict)}:
+                        countries_option.append({'label': db_country, 'value': db_country})
+
+                if db_region and regions_options is not None:
+                    if db_region.lower() not in {str(o.get('value','')).strip().lower() for o in regions_options if isinstance(o, dict)}:
+                        regions_options.append({'label': db_region, 'value': db_region})
+
+                return (
+                    False, "",
+                    row.get('age'),
+                    row.get('alcohol_percentage'),
+                    row.get('alcohol_type'),
+                    db_country,
+                    db_region,
+                    new_cask_options, db_casks,
+                    new_nose_options, db_nose,
+                    new_palate_options, db_palate,
+                    db_vol,
+                    bool(row.get('limited', False)),
+                    bool(row.get('special', False)),
+                    countries_option,
+                    regions_options,
+                    row.get('rarity'),
+                )
+        except Exception:
+            pass  # אם ה-lookup נכשל — ממשיכים ל-AI כרגיל
+
         try:
             prompt = f"""
 You are a strict Data Extraction Specialist for a high-end whisky database.
