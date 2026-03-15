@@ -578,7 +578,8 @@ def nfc_bottle_trigger(bottle_id):
 
 
 # --- Layout ---
-app.layout = dbc.Container([
+app.layout = dbc.Container(fluid=True, style={"maxWidth": "1600px"}, children=[
+
     dcc.Store(id='bottle-meta-store'),
     dcc.Store(id='details-open-store', data=None),
     dcc.Store(id='sort-state', data={'col': 'bottle_id', 'dir': 'DESC'}),
@@ -631,209 +632,257 @@ app.layout = dbc.Container([
     dbc.Tabs([
         # === TAB 1: ADD NEW BOTTLE & AI ===
         dbc.Tab(label="➕ Add New Bottle", children=[
+            html.Div([
+                dbc.Button("ADD", id='submit-new-btn', color="success",
+                    style={
+                        'position': 'absolute',
+                        'right': '-100px',
+                        'top': '410px',
+                        'width': '90px',
+                        'height': '90px',
+                        'zIndex': 10,
+                        'borderRadius': '12px',
+                        'padding': '0',
+                        'fontSize': '20px',
+                        'fontWeight': '700',
+                        'boxShadow': '0 0 0 3px #2563eb, 0 0 16px 4px #3b82f6',
+                        'border': '2px solid #2563eb',
+                    }
+                ),
             dbc.Card(dbc.CardBody([
-                dbc.Card([
-                    dbc.CardHeader(html.H5("🤖 AI Sommelier", className="m-0")),
-                    dbc.CardBody([
-                        html.P("Get purchase recommendations based on your current collection stats and budget."),
-                        dbc.Button("Get AI Recommendations", id='btn-ai-recommend', color="info", outline=True, size="sm"),
-                        dcc.Loading(html.Div(id='ai-output-area', className="mt-3 p-2", style={'backgroundColor': '#f0f8ff', 'borderRadius': '5px'}))
-                    ])
-                ], className="mb-4 border-info"),
 
-                html.H5("Manual Entry", className="mb-3"),
-
-                # ה-Layout המתוקן
+                # ══════════════════════════════════════════════════════
+                # ROW 1 — Identity (left) | Price & Inventory (right)
+                # ══════════════════════════════════════════════════════
                 dbc.Row([
-                    dbc.Col(create_dynamic_input('new-distillery', "Distillery"), width=4),
-                    dbc.Col(create_dynamic_input('new-bottle_name', "Bottle Name"), width=4),
 
+                    # ── LEFT: Identity ─────────────────────────────────
                     dbc.Col([
-                        # --- הטריק ליישור ---
-                        # אנחנו מוסיפים כותרת (Label) "שקופה". 
-                        # היא תופסת בדיוק את אותו הגובה כמו הכותרות של ה-Distillery וה-Bottle Name
-                        # וככה דוחפת את הכפתור להיות בדיוק בקו של השדות.
-                        dbc.Label("Spacer", style={"visibility": "hidden"}),
-                        
-                        dbc.Button(
-                            [
-                                html.I(className="fa-solid fa-wand-magic-sparkles me-2"), 
-                                "Magic Fill"
-                            ],
-                            id='btn_magic_fill',
-                            style=magic_btn_style,
-                        )
-                    ], width=2), # הורדתי את ה-className המורכב, ה-Label עושה את העבודה עכשיו
-                                        dbc.Col([
+                        dbc.Card([
+                            dbc.CardHeader(html.H6("🏷️ Identity", className="m-0 fw-semibold")),
+                            dbc.CardBody([
 
+                                # Distillery + Bottle Name + Magic Fill + AI Scan
+                                dbc.Row([
+                                    dbc.Col(create_dynamic_input('new-distillery', "Distillery"), width=4),
+                                    dbc.Col(create_dynamic_input('new-bottle_name', "Bottle Name"), width=4),
+                                    dbc.Col([
+                                        dbc.Label(".", style={"visibility": "hidden"}),
+                                        dbc.Button(
+                                            [html.I(className="fa-solid fa-wand-magic-sparkles me-1"), "Magic Fill"],
+                                            id='btn_magic_fill',
+                                            style={**magic_btn_style, 'fontSize': '13px', 'padding': '5px 10px'},
+                                        )
+                                    ], width=2),
+                                    dbc.Col([
+                                        dbc.Label(".", style={"visibility": "hidden"}),
+                                        dbc.Button(
+                                            [html.I(className="fa-solid fa-camera me-1"), "AI Scan"],
+                                            id='alc_scan',
+                                            style={**alc_scan_style, 'fontSize': '13px', 'padding': '5px 10px'},
+                                        )
+                                    ], width=2),
+                                ], className="mb-2 g-2"),
 
+                                # Type + Country + Region
+                                dbc.Row([
+                                    dbc.Col(create_dynamic_input('new-alcohol_type', "Alcohol Type"), width=4),
+                                    dbc.Col(create_dynamic_input('new-origin_country', "Country"), width=4),
+                                    dbc.Col(create_dynamic_input('new-region', "Region"), width=4),
+                                ], className="mb-2 g-2"),
 
-                        dbc.Label("Spacer", style={"visibility": "hidden"}),
-                        
-                        dbc.Button(
-                            [
-                                html.I(className="fa-solid fa-wand-magic-sparkles me-2"), 
-                                "AI Scan"
-                            ],
-                            id='alc_scan',
-                            style=alc_scan_style,
-                        )
-                    ], width=2), # הורדתי את ה-className המורכב, ה-Label עושה את העבודה עכשיו
-                    
-                ], className="mb-3 g-2"),
-                
+                                # Age + ABV + Rarity
+                                dbc.Row([
+                                    dbc.Col([dbc.Label("Age"), dbc.Input(id='new-age', type='number')], width=2),
+                                    dbc.Col([dbc.Label("ABV %"), dbc.Input(id='new-abv', type='number', step=0.1)], width=2),
+                                    dbc.Col([
+                                        dbc.Label("Rarity"),
+                                        dcc.Dropdown(id='new-rarity-dropdown', options=INITIAL_RARITY_OPTIONS, placeholder="Select...", clearable=True)
+                                    ], width=8),
+                                ], className="g-2"),
 
+                            ], className="pb-2"),
+                        ], className="h-100 shadow-sm"),
+                    ], width=7),
 
+                    # ── RIGHT: Price & Inventory ────────────────────────
+                    dbc.Col([
+                        dbc.Card([
+                            dbc.CardHeader(html.H6("💰 Price, Discounts & Inventory", className="m-0 fw-semibold")),
+                            dbc.CardBody([
+
+                                # Discounted? + Price + VFM
+                                dbc.Row([
+                                    dbc.Col([
+                                        dbc.Label("Was Discounted?"),
+                                        dcc.Dropdown(id='new-was-discounted', options=BOOLEAN_OPTIONS, value=False, clearable=False)
+                                    ], width=4),
+                                    dbc.Col([dbc.Label("Initial Price"), dbc.Input(id='new-price', type='number', placeholder="0.00")], width=4),
+                                    dbc.Col([
+                                        dbc.Label("VFM Score"),
+                                        dbc.Input(id='rvfm_score', type='text', disabled=True, style={'fontWeight': 'bold'})
+                                    ], width=4),
+                                ], className="mb-2 g-2"),
+
+                                # Discount fields (shown/hidden via callback)
+                                html.Div(id='price-container', children=[
+                                    dbc.Row([
+                                        html.Div(id='discount-fields-wrapper', style={'display': 'contents'}, children=[
+                                            dbc.Col(create_dynamic_input('new-discount_amount', "Discount %"), width=6),
+                                            dbc.Col([dbc.Label("Discounted Price"), dbc.Input(id='new-discounted-price', type='number', placeholder="Auto-calc")], width=6),
+                                        ]),
+                                    ], className="mb-2 g-2"),
+                                ]),
+
+                                # Dates + Stock % + Qty
+                                dbc.Row([
+                                    dbc.Col([dbc.Label("Purchase Date"), dcc.DatePickerSingle(id='new-purchase_date', display_format='YYYY-MM-DD', date=datetime.now().date())], width=3),
+                                    dbc.Col([dbc.Label("Opening Date"), dcc.DatePickerSingle(id='new-opening_date', display_format='YYYY-MM-DD')], width=3),
+                                    dbc.Col([dbc.Label("Vol (ml)"), dcc.Dropdown(
+                                        id='new-orignal_volume-dropdown',
+                                        options=INITIAL_OPTIONS.get('orignal_volume', []),
+                                        placeholder="Select...", clearable=True,
+                                    )], width=3),
+                                    dbc.Col([dbc.Label("Stock %"), dbc.Input(id='new-stock-percent', type='number', value=100)], width=2),
+                                    dbc.Col([dbc.Label("Qty"), dbc.Input(id='new-bottle-count', type='number', value=1)], width=1),
+                                ], className="mb-2 g-2"),
+
+                                # Limited / Special / Gift
+                                dbc.Row([
+                                    dbc.Col([dbc.Label("Limited?"), dcc.Dropdown(id='new-limited', options=BOOLEAN_OPTIONS, value=False)], width=4),
+                                    dbc.Col([dbc.Label("Special?"), dcc.Dropdown(id='new-special', options=BOOLEAN_OPTIONS, value=False)], width=4),
+                                    dbc.Col([dbc.Label("Gift?"), dcc.Dropdown(id='new-was-gift', options=BOOLEAN_OPTIONS, value=False)], width=4),
+                                ], className="g-2"),
+
+                            ], className="pb-2"),
+                        ], className="h-100 shadow-sm"),
+                    ], width=5),
+
+                ], className="mb-3 g-3"),
+
+                # ══════════════════════════════════════════════════════
+                # ROW 2 — Aroma Wheel (left) | Flavors + Scores + AI (right)
+                # ══════════════════════════════════════════════════════
                 dbc.Row([
-                    dbc.Col([dbc.Label("Age"), dbc.Input(id='new-age', type='number')], width=2),
-                    dbc.Col([dbc.Label("ABV"), dbc.Input(id='new-abv', type='number', step=0.1)], width=2),
-                    create_dynamic_input('new-alcohol_type', "Alcohol Type"),
+
+                    # ── LEFT: Aroma Wheel ───────────────────────────────
                     dbc.Col([
-                        dbc.Label("Rarity"),
-                        dcc.Dropdown(id='new-rarity-dropdown', options=INITIAL_RARITY_OPTIONS, placeholder="Select...", clearable=True)
-                    ], width=True, className="mb-3"),
+                        dbc.Card([
+                            dbc.CardHeader([
+                                html.H6("🌀 Flavors & Aroma Wheel", className="m-0 fw-semibold d-inline me-3"),
+                                html.Span("Apply selection to:", className="me-2 fw-semibold", style={'fontSize': '0.85rem'}),
+                                dbc.Checklist(
+                                    id='aroma-wheel-target',
+                                    options=[
+                                        {'label': html.Span([
+                                            html.Span("👃 Nose", className="me-1"),
+                                            html.Span("", style={'display': 'inline-block', 'width': '12px', 'height': '12px',
+                                                'backgroundColor': '#4C9BE8', 'borderRadius': '3px', 'verticalAlign': 'middle', 'marginLeft': '4px'}),
+                                        ]), 'value': 'nose'},
+                                        {'label': html.Span([
+                                            html.Span("👅 Palate", className="me-1"),
+                                            html.Span("", style={'display': 'inline-block', 'width': '12px', 'height': '12px',
+                                                'backgroundColor': '#A855F7', 'borderRadius': '3px', 'verticalAlign': 'middle', 'marginLeft': '4px'}),
+                                        ]), 'value': 'palette'},
+                                    ],
+                                    value=['nose', 'palette'],
+                                    inline=True,
+                                    switch=True,
+                                    className="d-inline-flex gap-3",
+                                ),
+                                html.Span([
+                                    html.Span("", style={'display': 'inline-block', 'width': '12px', 'height': '12px',
+                                        'backgroundColor': '#F59E0B', 'borderRadius': '3px', 'verticalAlign': 'middle', 'marginRight': '4px'}),
+                                    html.Span("✓ Both", style={'fontSize': '0.8rem', 'color': '#666'}),
+                                ], className="ms-2 d-inline-flex align-items-center"),
+                            ], className="d-flex align-items-center flex-wrap gap-2"),
+                            dbc.CardBody([
+                                dcc.Loading(
+                                    id='aroma-wheel-loading',
+                                    type='circle',
+                                    children=dcc.Graph(
+                                        id='aroma-wheel-graph',
+                                        figure={},
+                                        config={'displayModeBar': False},
+                                        style={'height': '560px'},
+                                    )
+                                ),
+                                dcc.Store(id='aroma-wheel-selected', data={}),
+                            ], className="p-2"),
+                        ], className="h-100 shadow-sm"),
+                    ], width=7),
+
+                    # ── RIGHT: Flavor dropdowns + Predicted scores + AI ──
+                    dbc.Col([
+                        dbc.Card([
+                            dbc.CardHeader(html.H6("🍃 Flavor Selections & Scores", className="m-0 fw-semibold")),
+                            dbc.CardBody([
+
+                                # Casks / Nose / Palette
+                                dbc.Row([
+                                    create_dynamic_input('new-casks_aged_in', "Casks", True),
+                                ], className="mb-2"),
+                                dbc.Row([
+                                    create_dynamic_input('new-nose', "Nose", True),
+                                ], className="mb-2"),
+                                dbc.Row([
+                                    create_dynamic_input('new-palette', "Palette", True),
+                                ], className="mb-3"),
+
+                                html.Hr(className="my-2"),
+                                html.P("📊 Predicted Scores", className="fw-semibold mb-2", style={'fontSize': '0.9rem'}),
+
+                                dbc.Row([
+                                    dbc.Col([
+                                        dbc.Label("Sweetness", style={'fontSize': '0.8rem'}),
+                                        dbc.Input(id='sweet_score', type='text', disabled=True,
+                                            style={'fontWeight': 'bold', 'borderRadius': 50, 'fontSize': '0.85rem'})
+                                    ], width=6),
+                                    dbc.Col([
+                                        dbc.Label("Richness", style={'fontSize': '0.8rem'}),
+                                        dbc.Input(id='rich_score', type='text', disabled=True,
+                                            style={'fontWeight': 'bold', 'borderRadius': 50, 'fontSize': '0.85rem'})
+                                    ], width=6),
+                                ], className="mb-2 g-2"),
+                                dbc.Row([
+                                    dbc.Col([
+                                        dbc.Label("Finish Strength", style={'fontSize': '0.8rem'}),
+                                        dbc.Input(id='finish_strength_score', type='text', disabled=True,
+                                            style={'fontWeight': 'bold', 'borderRadius': 50, 'fontSize': '0.85rem'})
+                                    ], width=6),
+                                    dbc.Col([
+                                        dbc.Label("Finish Length", style={'fontSize': '0.8rem'}),
+                                        dbc.Input(id='finish_length_score', type='text', disabled=True,
+                                            style={'fontWeight': 'bold', 'borderRadius': 50, 'fontSize': '0.85rem'})
+                                    ], width=6),
+                                ], className="mb-3 g-2"),
+
+                                html.Hr(className="my-2"),
+
+                                # AI Sommelier — collapsed into this panel
+                                html.P("🤖 AI Sommelier", className="fw-semibold mb-1", style={'fontSize': '0.9rem'}),
+                                html.P("Get purchase recommendations based on your collection stats and budget.",
+                                    className="text-muted mb-2", style={'fontSize': '0.8rem'}),
+                                dbc.Button("Get AI Recommendations", id='btn-ai-recommend', color="info",
+                                    outline=True, size="sm", className="mb-2"),
+                                dcc.Loading(html.Div(id='ai-output-area', className="mt-2 p-2",
+                                    style={'backgroundColor': '#f0f8ff', 'borderRadius': '5px', 'fontSize': '0.85rem'})),
+
+                            ]),
+                        ], className="h-100 shadow-sm"),
+                    ], width=5),
+
+                ], className="mb-3 g-3"),
 
 
-                        ], className="mb-3"),
-                    dbc.Row([
-                    dbc.Col([create_dynamic_input('new-origin_country', "Country") ],width = 4),
-                    dbc.Col([create_dynamic_input('new-region', "Region") ],width = 4),
-                    ], className="mb-3"),
-                
-                html.Hr(),
-                html.H5("Price & Discounts", className="mb-3 text-success"),
-                dbc.Row([
-                    dbc.Col([
-                        dbc.Label("Was Discounted?"),
-                        dcc.Dropdown(id='new-was-discounted', options=BOOLEAN_OPTIONS, value=False, clearable=False)
-                    ], width=3),
-                ], className="mb-2"),
-
-                html.Div(id='price-container', children=[
-                    dbc.Row([
-                        dbc.Col([dbc.Label("Initial Price"), dbc.Input(id='new-price', type='number', placeholder="0.00")], width=3),
-                        html.Div(id='discount-fields-wrapper', style={'display': 'none', 'display': 'contents'}, children=[
-                            create_dynamic_input('new-discount_amount', "Discount %"),
-                            dbc.Col([dbc.Label("Discounted Price"), dbc.Input(id='new-discounted-price', type='number', placeholder="Auto-calc")], width=3),
-                        ]),
-                    ]),
-                ], className="mb-4"),
-                
-                dbc.Row([
-                    dbc.Col([
-                        dbc.Label("VFM Score"),
-                        dbc.Input(id='rvfm_score', type='text', disabled=True,style={'width':300,'font-weight':'bold'})
-                    ])
-                ], className="mb-2"),
-                                 
-                html.Hr(),
-                html.H5("Flavors & Aroma Profile", className="mb-3"),
-
-                # ── Aroma Wheel ──────────────────────────────────────────────
-                dbc.Row([
-                    dbc.Col([
-                        # Target toggles + inline legend
-                        html.Div([
-                            html.Span("Apply selection to:", className="me-2 fw-semibold", style={'fontSize': '0.9rem'}),
-                            dbc.Checklist(
-                                id='aroma-wheel-target',
-                                options=[
-                                    {'label': html.Span([
-                                        html.Span("👃 Nose", className="me-1"),
-                                        html.Span("", style={
-                                            'display': 'inline-block', 'width': '14px', 'height': '14px',
-                                            'backgroundColor': '#4C9BE8', 'borderRadius': '3px',
-                                            'verticalAlign': 'middle', 'marginLeft': '4px'
-                                        }),
-                                    ]), 'value': 'nose'},
-                                    {'label': html.Span([
-                                        html.Span("👅 Palate", className="me-1"),
-                                        html.Span("", style={
-                                            'display': 'inline-block', 'width': '14px', 'height': '14px',
-                                            'backgroundColor': '#A855F7', 'borderRadius': '3px',
-                                            'verticalAlign': 'middle', 'marginLeft': '4px'
-                                        }),
-                                    ]), 'value': 'palette'},
-                                ],
-                                value=['nose', 'palette'],
-                                inline=True,
-                                switch=True,
-                                className="d-inline-flex gap-4",
-                            ),
-                            html.Span([
-                                html.Span("", style={
-                                    'display': 'inline-block', 'width': '14px', 'height': '14px',
-                                    'backgroundColor': '#F59E0B', 'borderRadius': '3px',
-                                    'verticalAlign': 'middle', 'marginRight': '4px'
-                                }),
-                                html.Span("✓ Both", style={'fontSize': '0.85rem', 'color': '#666'}),
-                            ], className="ms-3 d-inline-flex align-items-center"),
-                        ], className="mb-3 d-flex align-items-center flex-wrap"),
-
-                        # Static graph — always in DOM so clickData callback works
-                        dcc.Loading(
-                            id='aroma-wheel-loading',
-                            type='circle',
-                            children=dcc.Graph(
-                                id='aroma-wheel-graph',
-                                figure={},
-                                config={'displayModeBar': False},
-                                style={'height': '820px'},
-                            )
-                        ),
-
-                        # Hidden store
-                        dcc.Store(id='aroma-wheel-selected', data={}),
-                    ], width=12),
-                ], className="mb-3"),
-
-                # ── Dropdowns row ─────────────────────────────────────────────
-                dbc.Row([
-                    create_dynamic_input('new-casks_aged_in', "Casks", True),
-                    create_dynamic_input('new-nose', "Nose", True),
-                    create_dynamic_input('new-palette', "Palette", True),
-                    
-                ]),
-                dbc.Row([
-                    dbc.Col([
-                        dbc.Label("Predicted Sweetness Score"),
-                        dbc.Input(id='sweet_score', type='text', disabled=True, style={'width': '100%', 'font-weight': 'bold', 'border-radius': 50})
-                    ], width=3),
-                    dbc.Col([
-                        dbc.Label("Predicted Richness Score"),
-                        dbc.Input(id='rich_score', type='text', disabled=True, style={'width': '100%', 'font-weight': 'bold', 'border-radius': 50})
-                    ], width=3),
-                    dbc.Col([
-                        dbc.Label("Predicted Finish Strength"),
-                        dbc.Input(id='finish_strength_score', type='text', disabled=True, style={'width': '100%', 'font-weight': 'bold', 'border-radius': 50})
-                    ], width=3),
-                    dbc.Col([
-                        dbc.Label("Predicted Finish Length"),
-                        dbc.Input(id='finish_length_score', type='text', disabled=True, style={'width': '100%', 'font-weight': 'bold', 'border-radius': 50})
-                    ], width=3),
-                ], className="mb-2 g-2"),
-                html.Hr(),
-                html.H5("Details & Inventory", className="mb-3"),
-                dbc.Row([
-                    create_dynamic_input('new-orignal_volume', "Vol (ml)"),
-                    dbc.Col([dbc.Label("Purchase Date"), dcc.DatePickerSingle(id='new-purchase_date', display_format='YYYY-MM-DD', date=datetime.now().date())], width=2),
-                    dbc.Col([dbc.Label("Opening Date"), dcc.DatePickerSingle(id='new-opening_date', display_format='YYYY-MM-DD')], width=2),
-                    dbc.Col([dbc.Label("Initial Stock %"), dbc.Input(id='new-stock-percent', type='number', value=100)], width=2),
-                    dbc.Col([dbc.Label("Qty"), dbc.Input(id='new-bottle-count', type='number', value=1)], width=2),
-                ], className="mb-4"),
-                dbc.Row([
-                    dbc.Col([dbc.Label("Limited?"), dcc.Dropdown(id='new-limited', options=BOOLEAN_OPTIONS, value=False)], width=3),
-                    dbc.Col([dbc.Label("Special?"), dcc.Dropdown(id='new-special', options=BOOLEAN_OPTIONS, value=False)], width=3),
-                    dbc.Col([dbc.Label("Gift?"), dcc.Dropdown(id='new-was-gift', options=BOOLEAN_OPTIONS, value=False)], width=3),
-                ]),
-                
-                dbc.Button("Insert Bottle(s)", id='submit-new-btn', color="success", className="w-100 mt-5"),
-                
-            ]), className="mt-3")
+            ]), className="mt-3"),
+            ], style={'position': 'relative'}),
         ]),
 
         # === TAB 2: UPDATE (COMPLETELY REWRITTEN) ===
         dbc.Tab(label="🔄 Update Stock & Flavor", children=[
+            html.Div([
+
             dbc.Card(dbc.CardBody([
                 dbc.Row([
                     # Left Column
@@ -960,31 +1009,6 @@ app.layout = dbc.Container([
 
                         html.Div(id='bottle-info-badges', className="mb-3 text-center"),
 
-                        # Flavor Evolution Card
-                        dbc.Card([
-                            dbc.CardHeader([
-                                html.Span("🧬 Flavor Evolution", className="mr-2"),
-                                dbc.Button("✏️ Edit", id='btn-enable-edit', color="light", size="sm", style={'float': 'right'})
-                            ]),
-                            dbc.CardBody([
-                                dbc.Label("👃 Nose (Oxidation)"),
-                                dcc.Dropdown(id='upd-nose', multi=True, disabled=True, placeholder="Loading..."),
-                                dbc.Input(id='upd-nose-manual', placeholder="Add new (comma separated)...", className="mt-2", style={'display': 'none'}),
-                                
-                                html.Hr(className="my-3"),
-                                
-                                dbc.Label("👅 Palette (Oxidation)"),
-                                dcc.Dropdown(id='upd-palette', multi=True, disabled=True, placeholder="Loading..."),
-                                dbc.Input(id='upd-palette-manual', placeholder="Add new (comma separated)...", className="mt-2", style={'display': 'none'}),
-                                
-                                html.Hr(className="my-3"),
-                                
-                                dbc.Label("🧪 ABV % (Evaporation)"),
-                                dbc.Input(id='upd-abv', type='number', step=0.1, disabled=True),
-                                dbc.FormText("Cannot exceed original ABV.", color="muted")
-                            ])
-                        ], className="mb-3 border-secondary"),
-                        
                         # Drink Calculator
                         dbc.Card([
                             dbc.CardBody([
@@ -1014,11 +1038,14 @@ app.layout = dbc.Container([
                             ])
                         ], className="mb-3 bg-light"),
                         
-                        dbc.Button("💾 Save Changes", id='btn-save-update', color="primary", className="w-100 mt-2", size="lg"),
+
                     ], width=5),
 
-                    # Right Column: Bottle Visualizer
+                    # Right Column: Bottle Visualizer + Flavor Evolution side by side
                     dbc.Col([
+                        dbc.Row([
+                          # Bottle Level sub-col
+                          dbc.Col([
                         html.H4("Bottle Level", className="text-center mb-4"),
                         dbc.Row([
                         dbc.Col([
@@ -1031,7 +1058,7 @@ app.layout = dbc.Container([
                         ],
                         width=2,
                         className="d-flex justify-content-center",
-                        style={"marginTop": "60px"}  # <- הזזה למטה
+                        style={"marginTop": "60px"}
                         ),
                             dbc.Col([
                                 html.Div(
@@ -1151,8 +1178,32 @@ app.layout = dbc.Container([
                             ], width=8)
                         ], justify="center"),
                         html.H5(id='bottle-level-display', className="mt-3 text-info text-center", children="Select a bottle"),
-                        # refresh mini table every 5 minutes (same cadence as your DF cache)
                         dcc.Interval(id="best-before-interval", interval=300000, n_intervals=0),
+                          ], width=6),
+
+                          # Flavor Evolution sub-col
+                          dbc.Col([
+                            dbc.Card([
+                                dbc.CardHeader([
+                                    html.Span("🧬 Flavor Evolution", className="mr-2"),
+                                    dbc.Button("✏️ Edit", id='btn-enable-edit', color="light", size="sm", style={'float': 'right'})
+                                ]),
+                                dbc.CardBody([
+                                    dbc.Label("👃 Nose (Oxidation)"),
+                                    dcc.Dropdown(id='upd-nose', multi=True, disabled=True, placeholder="Loading..."),
+                                    dbc.Input(id='upd-nose-manual', placeholder="Add new (comma separated)...", className="mt-2", style={'display': 'none'}),
+                                    html.Hr(className="my-3"),
+                                    dbc.Label("👅 Palette (Oxidation)"),
+                                    dcc.Dropdown(id='upd-palette', multi=True, disabled=True, placeholder="Loading..."),
+                                    dbc.Input(id='upd-palette-manual', placeholder="Add new (comma separated)...", className="mt-2", style={'display': 'none'}),
+                                    html.Hr(className="my-3"),
+                                    dbc.Label("🧪 ABV % (Evaporation)"),
+                                    dbc.Input(id='upd-abv', type='number', step=0.1, disabled=True),
+                                    dbc.FormText("Cannot exceed original ABV.", color="muted")
+                                ])
+                            ], className="mb-3 border-secondary"),
+                          ], width=6),
+                        ], className="mb-3"),
 
                         dbc.Card(
                         dbc.CardBody(
@@ -1203,7 +1254,27 @@ app.layout = dbc.Container([
                     ),
                     ], width=7)
                 ])
-            ]), className="mt-3")
+            ]), className="mt-3"),
+                dbc.Button("💾 Save Changes", id='btn-save-update',
+                    style={
+                        'position': 'absolute',
+                        'right': '-100px',
+                        'top': '50%',
+                        'transform': 'translateY(-50%)',
+                        'width': '90px',
+                        'height': '90px',
+                        'zIndex': 10,
+                        'borderRadius': '12px',
+                        'padding': '0',
+                        'fontSize': '13px',
+                        'fontWeight': '700',
+                        'backgroundColor': '#198754',
+                        'border': '2px solid #2563eb',
+                        'color': 'white',
+                        'boxShadow': '0 0 0 3px #2563eb, 0 0 16px 4px #3b82f6',
+                    }
+                ),
+            ], style={'position': 'relative'}),
         ]),
         
 # === TAB 3: SEARCH (UPDATED RANGES & SORT) ===
