@@ -1877,7 +1877,7 @@ CAT_ORDER = [
     'Nuts',
     'Coffee & Mocha',
     'Wine & Sherry',
-    'Earthy, Wood & Smoke',
+    'Earthy - Smoky',
 ]
 
 # Sort direction within each category:
@@ -1892,7 +1892,7 @@ CAT_SORT = {
     'Nuts':                 'asc',   # starts light (Coconut), ends rich (Chestnuts)
     'Coffee & Mocha':       'desc',  # starts rich (Mocha), ends light (Coffee)
     'Wine & Sherry':        'asc',   # starts light (White Wine), ends rich (Sherry)
-    'Earthy, Wood & Smoke': 'desc',  # starts rich (Oak/Tabac), ends light (Minerals)
+    'Earthy - Smoky': 'desc',  # starts rich (Oak/Tabac), ends light (Minerals)
 }
 
 # Color stops — same palette used elsewhere in the app (smoky_sweet badge)
@@ -2060,7 +2060,7 @@ def build_aroma_wheel_figure(flavors, nose_selected, palette_selected):
     for cat, angles in cat_groups.items():
         mid_angle = (min(angles) + max(angles)) / 2
         mid_rad   = math.radians(mid_angle - 90)
-        label_r   = wheel_half * (radial_range_max / (radial_range_max + 1.8))
+        label_r   = wheel_half * (radial_range_max / (radial_range_max + 1.0))
         annotations.append(dict(
             x=0.5 + label_r * math.cos(mid_rad),
             y=0.5 - label_r * math.sin(mid_rad),
@@ -2069,7 +2069,7 @@ def build_aroma_wheel_figure(flavors, nose_selected, palette_selected):
             showarrow=False,
             font=dict(size=18, family='Segoe UI Black, Arial Black, sans-serif',
                       color=get_category_color_by_name(cat)),
-            bgcolor='rgba(255,255,255,0.88)',
+            bgcolor='rgba(0,0,0,0)',
             borderpad=4,
             xanchor='center',
             yanchor='middle',
@@ -2088,14 +2088,14 @@ def build_aroma_wheel_figure(flavors, nose_selected, palette_selected):
                 direction='clockwise',
                 rotation=90,
             ),
-            bgcolor='#f8f9fa',
+            bgcolor='rgba(0,0,0,0)',
             hole=0.07,
             domain=dict(x=[0.04, 0.96], y=[0.04, 0.96]),
         ),
         showlegend=False,
         margin=dict(l=20, r=20, t=20, b=20),
         autosize=True,
-        paper_bgcolor='white',
+        paper_bgcolor='rgba(0,0,0,0)',
         plot_bgcolor='white',
         clickmode='event',
         shapes=shapes,
