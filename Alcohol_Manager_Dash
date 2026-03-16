@@ -384,7 +384,7 @@ def fetch_bottle_list_optimized():
     query = f"SELECT bottle_id, bottle_name, distillery, stock_status_per FROM `{TABLE_REF}` ORDER BY bottle_id DESC"
     try:
         rows = client.query(query).result()
-        return [{'label': f"#{row.bottle_id} - {row.bottle_name} ({row.stock_status_per}%)", 'value': row.bottle_id} for row in rows]
+        return [{'label': f"#{row.bottle_id} - {row.distillery} - {row.bottle_name} ({row.stock_status_per}%)", 'value': row.bottle_id} for row in rows]
     except:
         return []
 
@@ -803,8 +803,9 @@ app.layout = dbc.Container(fluid=True, style={"maxWidth": "1600px"}, children=[
                                     children=dcc.Graph(
                                         id='aroma-wheel-graph',
                                         figure={},
-                                        config={'displayModeBar': False},
-                                        style={'height': '560px'},
+                                        config={'displayModeBar': False, 'responsive': True},
+                                        responsive=True,
+                                        style={'height': '560px', 'minHeight': '560px'},
                                     )
                                 ),
                                 dcc.Store(id='aroma-wheel-selected', data={}),
@@ -1006,40 +1007,55 @@ app.layout = dbc.Container(fluid=True, style={"maxWidth": "1600px"}, children=[
                                 html.Div(id='suggestion-top3-msg', className="text-muted mt-1", style={"fontSize": "12px"}),
                             ])
                         ], className="mb-3 border-dark"),
-
-                        html.Div(id='bottle-info-badges', className="mb-3 text-center"),
-
-                        # Drink Calculator
-                        dbc.Card([
-                            dbc.CardBody([
-                                dbc.Row([
-                                    dbc.Col([dbc.Label("Pour (ml)"), dbc.Input(id='pour-size', type='number', value=30)], width=4),
-                                    dbc.Col([dbc.Label("Glasses"), dbc.Input(id='glass-count', type='number', value=1)], width=4),
-                                    dbc.Col([dbc.Label("Action"), dbc.Button("Drink!", id='btn-calculate-pour', color="warning", outline=True, className="w-100")], width=4),
-                                ], className="mb-2"),
-                                dbc.Row([
-                                    dbc.Col([
-                                        dbc.Label("🥃 Who's drinking?"),
-                                        dcc.Dropdown(
-                                            id='drinker-pour',
-                                            options=[],
-                                            multi=True,
-                                            placeholder="Select drinker(s)...",
-                                            style={'fontSize': '13px'},
-                                        ),
-                                        dbc.Input(
-                                            id='drinker-pour-manual',
-                                            placeholder="Or type new name(s), comma separated...",
-                                            size="sm",
-                                            className="mt-1",
-                                        ),
-                                    ]),
-                                ]),
-                            ])
-                        ], className="mb-3 bg-light"),
+                        dbc.Card(
+                        dbc.CardBody(
+                            [
+                                html.Div("🧾 Top 3 bottles losing flavors soon", className="fw-bold mb-2"),
+                                dash_table.DataTable(
+                                    id="bb-top3-dt",
+                                    columns=[
+                                        {"name": "Distillery", "id": "distillery"},
+                                        {"name": "Bottle", "id": "bottle_name"},
+                                        {"name": "Best Before", "id": "Best_Before"},
+                                        {"name": "Days Left", "id": "days_left"},
+                                        {"name": "bottle_id", "id": "bottle_id"},
+                                    ],
+                                    hidden_columns=["bottle_id"],
+                                    data=[],
+                                    page_action="none",
+                                    sort_action="none",
+                                    row_selectable=False,
+                                    style_as_list_view=True,
+                                    style_table={"overflowX": "auto", "maxWidth": "500px"},
+                                    style_cell={
+                                        "padding": "8px",
+                                        "fontSize": "14px",
+                                        "border": "none",
+                                        "whiteSpace": "nowrap",
+                                    },
+                                    style_header={
+                                        "fontWeight": "700",
+                                        "borderBottom": "1px solid rgba(0,0,0,0.08)",
+                                    },
+                                    style_data={
+                                        "borderBottom": "1px solid rgba(0,0,0,0.06)",
+                                    },
+                                    style_data_conditional=[
+                                        {"if": {"state": "active"}, "cursor": "pointer"},
+                                    ],
+                                ),
+                                html.Div(id="bb-top3-msg", className="text-muted mt-2", style={"fontSize": "13px"}),
+                            ]
+                        ),
+                        className="border-0 mt-3",
                         
-
-                    ], width=5),
+                        style={
+                            "borderRadius": "14px",
+                            "boxShadow": "0 6px 18px rgba(0,0,0,0.08)",
+                            "background": "rgba(255,255,255,0.92)",
+                        },
+                    ),
+                    ], width=3),
 
                     # Right Column: Bottle Visualizer + Flavor Evolution side by side
                     dbc.Col([
@@ -1175,84 +1191,109 @@ app.layout = dbc.Container(fluid=True, style={"maxWidth": "1600px"}, children=[
                                         )
                                     ]
                                 )
-                            ], width=8)
+                            ], width=5)
                         ], justify="center"),
                         html.H5(id='bottle-level-display', className="mt-3 text-info text-center", children="Select a bottle"),
                         dcc.Interval(id="best-before-interval", interval=300000, n_intervals=0),
-                          ], width=6),
+                        html.Div(id='bottle-info-badges', className="mb-3 text-center"),                        
+                        # Drink Calculator
+                        dbc.Card([
+                            dbc.CardBody([
+                                dbc.Row([
+                                    dbc.Col([dbc.Label("Pour (ml)"), dbc.Input(id='pour-size', type='number', value=30)], width=4),
+                                    dbc.Col([dbc.Label("Glasses"), dbc.Input(id='glass-count', type='number', value=1)], width=4),
+                                    dbc.Col([dbc.Label("Action"), dbc.Button("Drink!", id='btn-calculate-pour', color="warning", outline=True, className="w-100")], width=4),
+                                ], className="mb-2"),
+                                dbc.Row([
+                                    dbc.Col([
+                                        dbc.Label("🥃 Who's drinking?"),
+                                        dcc.Dropdown(
+                                            id='drinker-pour',
+                                            options=[],
+                                            multi=True,
+                                            placeholder="Select drinker(s)...",
+                                            style={'fontSize': '13px'},
+                                        ),
+                                        dbc.Input(
+                                            id='drinker-pour-manual',
+                                            placeholder="Or type new name(s), comma separated...",
+                                            size="sm",
+                                            className="mt-1",
+                                        ),
+                                    ]),
+                                ]),
+                            ])
+                        ], className="mb-3 bg-light"),
+                          ], width=5),
 
                           # Flavor Evolution sub-col
                           dbc.Col([
                             dbc.Card([
                                 dbc.CardHeader([
-                                    html.Span("🧬 Flavor Evolution", className="mr-2"),
-                                    dbc.Button("✏️ Edit", id='btn-enable-edit', color="light", size="sm", style={'float': 'right'})
-                                ]),
+                                    html.H6("🧬 Flavor Evolution", className="m-0 fw-semibold d-inline me-3"),
+                                    html.Span("Apply to:", className="me-2 fw-semibold", style={'fontSize': '0.85rem'}),
+                                    dbc.Checklist(
+                                        id='upd-aroma-wheel-target',
+                                        options=[
+                                            {'label': html.Span([
+                                                html.Span("👃 Nose", className="me-1"),
+                                                html.Span("", style={'display': 'inline-block', 'width': '12px', 'height': '12px',
+                                                    'backgroundColor': '#4C9BE8', 'borderRadius': '3px', 'verticalAlign': 'middle', 'marginLeft': '4px'}),
+                                            ]), 'value': 'nose'},
+                                            {'label': html.Span([
+                                                html.Span("👅 Palate", className="me-1"),
+                                                html.Span("", style={'display': 'inline-block', 'width': '12px', 'height': '12px',
+                                                    'backgroundColor': '#A855F7', 'borderRadius': '3px', 'verticalAlign': 'middle', 'marginLeft': '4px'}),
+                                            ]), 'value': 'palette'},
+                                        ],
+                                        value=['nose', 'palette'],
+                                        inline=True,
+                                        switch=True,
+                                        className="d-inline-flex gap-3",
+                                    ),
+                                    html.Span([
+                                        html.Span("", style={'display': 'inline-block', 'width': '12px', 'height': '12px',
+                                            'backgroundColor': '#F59E0B', 'borderRadius': '3px', 'verticalAlign': 'middle', 'marginRight': '4px'}),
+                                        html.Span("✓ Both", style={'fontSize': '0.8rem', 'color': '#666'}),
+                                    ], className="ms-2 d-inline-flex align-items-center"),
+                                    dbc.Button("✏️ Edit", id='btn-enable-edit', color="light", size="sm", className="ms-auto"),
+                                ], className="d-flex align-items-center flex-wrap gap-2"),
                                 dbc.CardBody([
+                                    # Aroma wheel
+                                    html.Div(
+                                        id='upd-aroma-wheel-wrapper',
+                                        style={'pointerEvents': 'none', 'opacity': '0.5'},
+                                        children=dcc.Loading(
+                                            id='upd-aroma-wheel-loading',
+                                            type='circle',
+                                            children=dcc.Graph(
+                                                id='upd-aroma-wheel-graph',
+                                                figure={},
+                                                config={'displayModeBar': False, 'responsive': True},
+                                                responsive=True,
+                                                style={'height': '420px', 'minHeight': '420px'},
+                                            )
+                                        ),
+                                    ),
+                                    html.Hr(className="my-2"),
                                     dbc.Label("👃 Nose (Oxidation)"),
                                     dcc.Dropdown(id='upd-nose', multi=True, disabled=True, placeholder="Loading..."),
                                     dbc.Input(id='upd-nose-manual', placeholder="Add new (comma separated)...", className="mt-2", style={'display': 'none'}),
-                                    html.Hr(className="my-3"),
+                                    html.Hr(className="my-2"),
                                     dbc.Label("👅 Palette (Oxidation)"),
                                     dcc.Dropdown(id='upd-palette', multi=True, disabled=True, placeholder="Loading..."),
                                     dbc.Input(id='upd-palette-manual', placeholder="Add new (comma separated)...", className="mt-2", style={'display': 'none'}),
-                                    html.Hr(className="my-3"),
+                                    html.Hr(className="my-2"),
                                     dbc.Label("🧪 ABV % (Evaporation)"),
                                     dbc.Input(id='upd-abv', type='number', step=0.1, disabled=True),
                                     dbc.FormText("Cannot exceed original ABV.", color="muted")
                                 ])
                             ], className="mb-3 border-secondary"),
-                          ], width=6),
+                          ], width=7),
                         ], className="mb-3"),
 
-                        dbc.Card(
-                        dbc.CardBody(
-                            [
-                                html.Div("🧾 Top 3 bottles losing flavors soon", className="fw-bold mb-2"),
-                                dash_table.DataTable(
-                                    id="bb-top3-dt",
-                                    columns=[
-                                        {"name": "Distillery", "id": "distillery"},
-                                        {"name": "Bottle", "id": "bottle_name"},
-                                        {"name": "Best Before", "id": "Best_Before"},
-                                        {"name": "Days Left", "id": "days_left"},
-                                        {"name": "bottle_id", "id": "bottle_id"},
-                                    ],
-                                    hidden_columns=["bottle_id"],
-                                    data=[],
-                                    page_action="none",
-                                    sort_action="none",
-                                    row_selectable=False,
-                                    style_as_list_view=True,
-                                    style_table={"overflowX": "auto"},
-                                    style_cell={
-                                        "padding": "8px",
-                                        "fontSize": "14px",
-                                        "border": "none",
-                                        "whiteSpace": "nowrap",
-                                    },
-                                    style_header={
-                                        "fontWeight": "700",
-                                        "borderBottom": "1px solid rgba(0,0,0,0.08)",
-                                    },
-                                    style_data={
-                                        "borderBottom": "1px solid rgba(0,0,0,0.06)",
-                                    },
-                                    style_data_conditional=[
-                                        {"if": {"state": "active"}, "cursor": "pointer"},
-                                    ],
-                                ),
-                                html.Div(id="bb-top3-msg", className="text-muted mt-2", style={"fontSize": "13px"}),
-                            ]
-                        ),
-                        className="border-0 mt-3",
-                        style={
-                            "borderRadius": "14px",
-                            "boxShadow": "0 6px 18px rgba(0,0,0,0.08)",
-                            "background": "rgba(255,255,255,0.92)",
-                        },
-                    ),
-                    ], width=7)
+
+                    ], width=9)
                 ])
             ]), className="mt-3"),
                 dbc.Button("💾 Save Changes", id='btn-save-update',
@@ -2053,7 +2094,7 @@ def build_aroma_wheel_figure(flavors, nose_selected, palette_selected):
         ),
         showlegend=False,
         margin=dict(l=20, r=20, t=20, b=20),
-        height=820,
+        autosize=True,
         paper_bgcolor='white',
         plot_bgcolor='white',
         clickmode='event',
@@ -3181,27 +3222,32 @@ def poll_scan_status(n, session_id, cask_opts, nose_opts,
         Output('upd-palette', 'options'),
         Output('upd-palette', 'value'),
         Output('upd-abv', 'value'),
-        Output('bottle-info-badges', 'children')
+        Output('bottle-info-badges', 'children'),
+        Output('upd-aroma-wheel-graph', 'figure'),
     ],
     Input('update-selector', 'value')
 )
 
 def load_bottle_data(bottle_id):
     # NOTE: Update tab must read from the cached DF (refreshes every 5 minutes)
-    
+    _empty_wheel = build_aroma_wheel_figure(
+        flavors_df[['flavor_name', 'richness_score', 'smoky_sweet_score', 'flavor_category']].to_dict('records'),
+        [], []
+    )
+
     if not bottle_id:
-        return None, [], [], [], [], None, []
+        return None, [], [], [], [], None, [], _empty_wheel
 
     try:
         bid = int(bottle_id)
 
         df = get_all_data_as_df()
         if df is None or df.empty or 'bottle_id' not in df.columns:
-            return None, [], [], [], [], None, []
+            return None, [], [], [], [], None, [], _empty_wheel
 
         row = df[df["bottle_id"] == bid]
         if row.empty:
-            return None, [], [], [], [], None, []
+            return None, [], [], [], [], None, [], _empty_wheel
 
         r = row.iloc[0]
 
@@ -3291,13 +3337,17 @@ def load_bottle_data(bottle_id):
             html.Div(flavor_spans) if flavor_spans else None,
         ])
 
-        return meta, nose_opts, nose_values, palette_opts, palette_values, abv_value, badges
+        wheel_fig = build_aroma_wheel_figure(
+            flavors_df[['flavor_name', 'richness_score', 'smoky_sweet_score', 'flavor_category']].to_dict('records'),
+            nose_values, palette_values
+        )
+        return meta, nose_opts, nose_values, palette_opts, palette_values, abv_value, badges, wheel_fig
 
     except Exception as e:
         print(f"Load Error (DF): {e}")
         import traceback
         traceback.print_exc()
-        return None, [], [], [], [], None, []
+        return None, [], [], [], [], None, [], _empty_wheel
 
 # 1.5 Estimated Bottle 
 @app.callback(
@@ -3483,7 +3533,8 @@ def select_bottle_from_suggestion_table(active_cell, data):
 
 # 2. TOGGLE EDIT MODE
 @app.callback(
-    [Output('upd-nose', 'disabled'),
+    [Output('upd-aroma-wheel-wrapper', 'style'),
+     Output('upd-nose', 'disabled'),
      Output('upd-palette', 'disabled'),
      Output('upd-abv', 'disabled'),
      Output('upd-nose-manual', 'style'),
@@ -3495,8 +3546,105 @@ def select_bottle_from_suggestion_table(active_cell, data):
 )
 def toggle_edit(n):
     if n and n % 2 != 0:  # Odd clicks = editing
-        return False, False, False, {'display': 'block'}, {'display': 'block'}, "🔓 Editing", "warning"
-    return True, True, True, {'display': 'none'}, {'display': 'none'}, "✏️ Edit", "light"
+        return {'pointerEvents': 'auto', 'opacity': '1'}, False, False, False, {'display': 'block'}, {'display': 'block'}, "🔓 Editing", "warning"
+    return {'pointerEvents': 'none', 'opacity': '0.5'}, True, True, True, {'display': 'none'}, {'display': 'none'}, "✏️ Edit", "light"
+
+
+# 2b. UPD WHEEL: re-render figure when nose/palette dropdowns change
+@app.callback(
+    Output('upd-aroma-wheel-graph', 'figure', allow_duplicate=True),
+    Input('upd-nose', 'value'),
+    Input('upd-palette', 'value'),
+    prevent_initial_call=True
+)
+def upd_render_aroma_wheel(nose_vals, palette_vals):
+    nose_sel = [str(v) for v in (nose_vals or []) if isinstance(v, (str, int, float))]
+    palette_sel = [str(v) for v in (palette_vals or []) if isinstance(v, (str, int, float))]
+    flavors = flavors_df[['flavor_name', 'richness_score', 'smoky_sweet_score', 'flavor_category']].to_dict('records')
+    return build_aroma_wheel_figure(flavors, nose_sel, palette_sel)
+
+
+# 2c. UPD WHEEL: click on wheel → update upd-nose / upd-palette stores
+def _ensure_option(opts, flavor):
+    existing = set()
+    for o in opts:
+        v = o.get('value')
+        if isinstance(v, (str, int, float)):
+            existing.add(v)
+    if flavor not in existing:
+        opts = [{'label': flavor, 'value': flavor}] + list(opts)
+    return opts
+
+@app.callback(
+    Output('upd-nose', 'value', allow_duplicate=True),
+    Output('upd-nose', 'options', allow_duplicate=True),
+    Output('upd-palette', 'value', allow_duplicate=True),
+    Output('upd-palette', 'options', allow_duplicate=True),
+    Output('upd-aroma-wheel-graph', 'figure', allow_duplicate=True),
+    Input('upd-aroma-wheel-graph', 'clickData'),
+    State('upd-aroma-wheel-target', 'value'),
+    State('upd-nose', 'value'),
+    State('upd-nose', 'options'),
+    State('upd-palette', 'value'),
+    State('upd-palette', 'options'),
+    prevent_initial_call=True
+)
+def upd_handle_wheel_click(click_data, targets, nose_val, nose_opts, pal_val, pal_opts):
+    if not click_data:
+        raise PreventUpdate
+    try:
+        pt = click_data['points'][0]
+        # customdata is always (flavor_name, category) — take index 0
+        cd = pt.get('customdata')
+        if cd is not None:
+            clicked_flavor = cd[0] if isinstance(cd, (list, tuple)) else str(cd)
+        else:
+            raise PreventUpdate
+        clicked_flavor = str(clicked_flavor).strip()
+        if not clicked_flavor:
+            raise PreventUpdate
+    except (KeyError, IndexError, TypeError):
+        raise PreventUpdate
+
+    new_nose_val = list(nose_val or [])
+    new_nose_opts = list(nose_opts or [])
+    new_pal_val = list(pal_val or [])
+    new_pal_opts = list(pal_opts or [])
+
+    in_nose    = clicked_flavor in new_nose_val
+    in_palette = clicked_flavor in new_pal_val
+    both_targeted = 'nose' in (targets or []) and 'palette' in (targets or [])
+
+    if both_targeted:
+        # BOTH mode: if already in both → remove from both. Otherwise → add to whichever is missing.
+        if in_nose and in_palette:
+            new_nose_val.remove(clicked_flavor)
+            new_pal_val.remove(clicked_flavor)
+        else:
+            if not in_nose:
+                new_nose_opts = _ensure_option(new_nose_opts, clicked_flavor)
+                new_nose_val.append(clicked_flavor)
+            if not in_palette:
+                new_pal_opts = _ensure_option(new_pal_opts, clicked_flavor)
+                new_pal_val.append(clicked_flavor)
+    else:
+        if 'nose' in (targets or []):
+            new_nose_opts = _ensure_option(new_nose_opts, clicked_flavor)
+            if in_nose:
+                new_nose_val.remove(clicked_flavor)
+            else:
+                new_nose_val.append(clicked_flavor)
+
+        if 'palette' in (targets or []):
+            new_pal_opts = _ensure_option(new_pal_opts, clicked_flavor)
+            if in_palette:
+                new_pal_val.remove(clicked_flavor)
+            else:
+                new_pal_val.append(clicked_flavor)
+
+    flavors = flavors_df[['flavor_name', 'richness_score', 'smoky_sweet_score', 'flavor_category']].to_dict('records')
+    fig = build_aroma_wheel_figure(flavors, new_nose_val, new_pal_val)
+    return new_nose_val, new_nose_opts, new_pal_val, new_pal_opts, fig
 
 
 # 3. VISUAL UPDATE (FIXED - Shows correct initial level)
