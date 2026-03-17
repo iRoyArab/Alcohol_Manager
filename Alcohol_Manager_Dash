@@ -3314,8 +3314,13 @@ def load_bottle_data(bottle_id):
 
         current_ml = int(meta["vol"] * (meta["stock"] / 100.0))
         pred_finish = r.get("predicted_finish_date") if isinstance(r, dict) else getattr(r, "predicted_finish_date", None)
+        best_bef = r.get("Best_Before") if isinstance(r, dict) else getattr(r, "Best_Before", None)
+        
         pred_finish_str = _fmt_date(pred_finish)
         pred_txt  = f"Predicted finish: {pred_finish_str}"
+        
+        best_bef_str = _fmt_date(best_bef)
+        best_txt = f"Best Before: {best_bef_str}"
         
         s_score    = _safe_float(r.get('final_smoky_sweet_score'))
         r_score    = _safe_float(r.get('final_richness_score'))
@@ -3332,8 +3337,10 @@ def load_bottle_data(bottle_id):
             html.Div([
                 dbc.Badge(f"Total: {meta['vol']}ml", color="dark", className="me-2"),
                 dbc.Badge(f"Current: {current_ml}ml", color="info", className="me-2"),
-                dbc.Badge(pred_txt, color="warning", pill=True),
             ], className="mb-2"),
+            html.Div([dbc.Badge(pred_txt, color="warning", pill=True, className="me-2"),
+                dbc.Badge(best_txt, color="primary", pill=True, className="me-2"),
+                ],className="mb-2"),
             html.Div(flavor_spans) if flavor_spans else None,
         ])
 
