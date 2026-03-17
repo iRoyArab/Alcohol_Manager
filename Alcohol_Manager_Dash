@@ -214,7 +214,43 @@ def badge_style_rich(score):
         "fontSize": "12px",
     }
 
+def badge_style_best_before(date_value):
+    from datetime import date, datetime
+    
+    STOPS = [
+        (-365, "#cc2200"),
+        (-90,  "#ff4422"),
+        (-30,  "#ff7733"),
+        (0,    "#ffdd00"),
+        (30,   "#aadd44"),
+        (90,   "#55cc44"),
+        (365,  "#22aa22"),
+    ]
 
+    bg = "#f8f9fa"
+
+    if date_value is not None:
+        try:
+            if isinstance(date_value, datetime):
+                date_value = date_value.date()
+            elif isinstance(date_value, str):
+                date_value = datetime.strptime(date_value, "%Y-%m-%d").date()
+            # אם כבר date — ישירות
+            days = (date_value - date.today()).days
+            bg = _lerp_color_by_stops(days, STOPS)
+        except Exception as e:
+            print(f"badge_style_best_before error: {e}, value: {date_value}, type: {type(date_value)}")
+
+    return {
+        "backgroundColor": bg,
+        "color": "#ffffff" if _is_dark_bg(bg) else "#000000",
+        "fontWeight": "700",
+        "borderRadius": "20px",
+        "padding": "4px 10px",
+        "display": "inline-block",
+        "whiteSpace": "nowrap",
+        "fontSize": "12px",
+    }
 
 # נגדיר את הסטייל כמשתנה כדי שהקוד למטה יישאר נקי
 magic_btn_style = {
@@ -381,7 +417,7 @@ def fetch_rarity_options():
 
 def fetch_bottle_list_optimized():
     if not client: return []
-    query = f"SELECT bottle_id, bottle_name, distillery, stock_status_per FROM `{TABLE_REF}` ORDER BY bottle_id DESC"
+    query = f"SELECT bottle_id, bottle_name, distillery, stock_status_per FROM `{TABLE_REF}` Where stock_status_per > 0 ORDER BY bottle_id DESC"
     try:
         rows = client.query(query).result()
         return [{'label': f"#{row.bottle_id} - {row.distillery} - {row.bottle_name} ({row.stock_status_per}%)", 'value': row.bottle_id} for row in rows]
@@ -3315,8 +3351,8 @@ def load_bottle_data(bottle_id):
         current_ml = int(meta["vol"] * (meta["stock"] / 100.0))
         pred_finish = r.get("predicted_finish_date") if isinstance(r, dict) else getattr(r, "predicted_finish_date", None)
         best_bef = r.get("Best_Before") if isinstance(r, dict) else getattr(r, "Best_Before", None)
-        
         pred_finish_str = _fmt_date(pred_finish)
+         
         pred_txt  = f"Predicted finish: {pred_finish_str}"
         
         best_bef_str = _fmt_date(best_bef)
@@ -3339,7 +3375,7 @@ def load_bottle_data(bottle_id):
                 dbc.Badge(f"Current: {current_ml}ml", color="info", className="me-2"),
             ], className="mb-2"),
             html.Div([dbc.Badge(pred_txt, color="warning", pill=True, className="me-2"),
-                dbc.Badge(best_txt, color="primary", pill=True, className="me-2"),
+                html.Span(best_txt, style=badge_style_best_before(best_bef)),
                 ],className="mb-2"),
             html.Div(flavor_spans) if flavor_spans else None,
         ])
@@ -4921,7 +4957,7 @@ def search_bottles(n, sort_data, n_prev, n_next,view_mode, txt, mode, sweet_vals
 
     def progress_bar(val):
         colors = {
-            100: "#006400", 95: "#90EE90", 85: "#FFD700", 70: "#FFB347",
+            100: "#006400", 95: "#228B22", 85: "#90EE90", 75: "#FFB347",
             50: "#FF8C00", 35: "#FA8072", 20: "#B22222", 10: "#8B0000"
         }
         bg = "#808080"
