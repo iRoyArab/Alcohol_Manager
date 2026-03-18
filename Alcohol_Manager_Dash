@@ -231,13 +231,15 @@ def badge_style_best_before(date_value):
 
     if date_value is not None:
         try:
-            if isinstance(date_value, datetime):
-                date_value = date_value.date()
-            elif isinstance(date_value, str):
-                date_value = datetime.strptime(date_value, "%Y-%m-%d").date()
-            # אם כבר date — ישירות
-            days = (date_value - date.today()).days
-            bg = _lerp_color_by_stops(days, STOPS)
+            if pd.isnull(date_value):
+                pass  # נשאר bg = "#f8f9fa"
+            else:
+                if isinstance(date_value, datetime):
+                    date_value = date_value.date()
+                elif isinstance(date_value, str):
+                    date_value = datetime.strptime(date_value, "%Y-%m-%d").date()
+                days = (date_value - date.today()).days
+                bg = _lerp_color_by_stops(days, STOPS)
         except Exception as e:
             print(f"badge_style_best_before error: {e}, value: {date_value}, type: {type(date_value)}")
 
