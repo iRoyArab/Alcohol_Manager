@@ -3839,14 +3839,16 @@ def toggle_dram_mode(mode):
 )
 def load_drinkers_pour(bottle_id):
     try:
-        query = f"""
-        SELECT DISTINCT name
-        FROM `{HISTORY_TABLE_REF}`, UNNEST(drinker_name) AS name
-        WHERE name IS NOT NULL AND TRIM(name) != ''
-        ORDER BY name
-        """
-        df = client.query(query).to_dataframe()
-        return [{"label": name, "value": name} for name in df["name"].tolist()]
+        dfh = get_history_as_df()
+        if dfh.empty or "drinker_name" not in dfh.columns:
+            return []
+        names = sorted({
+            name.strip()
+            for cell in dfh["drinker_name"].dropna()
+            for name in (cell if isinstance(cell, list) else [cell])
+            if name and str(name).strip()
+        })
+        return [{"label": n, "value": n} for n in names]
     except Exception:
         return []
 
@@ -3860,14 +3862,16 @@ def load_drinkers(mode):
     if mode != 'personalized':
         return no_update
     try:
-        query = f"""
-        SELECT DISTINCT name
-        FROM `{HISTORY_TABLE_REF}`, UNNEST(drinker_name) AS name
-        WHERE name IS NOT NULL AND TRIM(name) != ''
-        ORDER BY name
-        """
-        df = client.query(query).to_dataframe()
-        return [{"label": name, "value": name} for name in df["name"].tolist()]
+        dfh = get_history_as_df()
+        if dfh.empty or "drinker_name" not in dfh.columns:
+            return []
+        names = sorted({
+            name.strip()
+            for cell in dfh["drinker_name"].dropna()
+            for name in (cell if isinstance(cell, list) else [cell])
+            if name and str(name).strip()
+        })
+        return [{"label": n, "value": n} for n in names]
     except Exception as e:
         return []
 
