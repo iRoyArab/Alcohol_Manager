@@ -560,6 +560,69 @@ def get_flavors_df():
     df = client.query(query).to_dataframe()
     return df
 
+def compute_flavor_scores_from_flavors(nose_list, palette_list, abv):
+    """
+    מחשב final_richness_score ו-final_smoky_sweet_score
+    על בסיס רשימות nose/palette עדכניות + ABV,
+    בדיוק כמו ה-BigQuery View — אבל ב-Python.
+    """
+    import math
+    
+    all_flavors = list(set((nose_list or []) + (palette_list or [])))
+    if not all_flavors:
+        return None, None
+
+    abv = float(abv) if abv else 43.0
+    
+    # Lookup scores מתוך flavors_df שכבר בזיכרון
+    flavor_lookup = flavors_df.set_index('flavor_name')[['richness_score','smoky_sweet_score']].to_dict('index')
+    
+    matched = [flavor_lookup[f] for f in all_flavors if f in flavor_lookup]
+    if not matched:
+        return None, None
+
+    unique_count = len(matched)
+    raw_richness   = sum(m['richness_score']   for m in matched) / unique_count
+    raw_smoky_sweet = sum(m['smoky_sweet_score'] for m in matched) / unique_count
+
+    # Flags
+    rich       = any(m['richness_score'] == 8.0 for m in matched)
+    super_rich = any(m['richness_score'] == 9.0 for m in matched)
+    rich_joker = any(f in ('butterscotch','Marmalade','Chocolate','Coffee','Espresso') for f in all_flavors)
+    bitter     = any(f in ('Dark Chocolate','Coffee','Espresso','Mocha','Tiramisu') for f in all_flavors)
+    light_smoke = any(f in ('Minerals','Sulfur','Meaty','Chalk','Metalic') for f in all_flavors)
+
+    # PenalizedStats
+    base_richness = (raw_richness * 0.7 if unique_count < 4 else raw_richness)
+    base_richness *= (1.3 if rich else 1.0) * (1.55 if super_rich else 1.0) * (1.4 if rich_joker else 1.0)
+
+    base_smoky_sweet = (raw_smoky_sweet * 0.7 if unique_count <= 4 else raw_smoky_sweet)
+    base_smoky_sweet *= (1.25 if bitter else 1.0) * (1.4 if light_smoke else 1.0)
+
+    # ABV multipliers — richness
+    if   40 <= abv < 48:  fr = base_richness * 0.9
+    elif 48 <= abv < 54:  fr = base_richness * 1.1
+    elif 54 <= abv < 59:  fr = base_richness * 1.25
+    elif 59 <= abv < 65:  fr = base_richness * 1.4
+    elif 65 <= abv < 71:  fr = base_richness * 1.5
+    else:                 fr = base_richness
+
+    # ABV multipliers — smoky/sweet
+    if 40 <= abv < 47:
+        fs = base_smoky_sweet * 0.7
+    elif 47 <= abv < 54:
+        fs = base_smoky_sweet * (0.8 if base_smoky_sweet < 5 else 1.1)
+    elif 54 <= abv < 59:
+        fs = base_smoky_sweet * (0.75 if base_smoky_sweet < 5 else 1.2)
+    elif 59 <= abv < 65:
+        fs = base_smoky_sweet * (0.65 if base_smoky_sweet < 5 else 1.45)
+    elif 65 <= abv < 71:
+        fs = base_smoky_sweet * (0.55 if base_smoky_sweet < 5 else 1.5)
+    else:
+        fs = base_smoky_sweet
+
+    return round(fr, 2), round(fs, 2)
+
 
 global flavors_df
 flavors_df = get_flavors_df()
@@ -780,9 +843,9 @@ app.layout = dbc.Container(fluid=True, style={"maxWidth": "1600px"}, children=[
                                         id='new-orignal_volume-dropdown',
                                         options=INITIAL_OPTIONS.get('orignal_volume', []),
                                         placeholder="Select...", clearable=True,
-                                    )], width=3),
+                                    ), dbc.Input(id='new-orignal_volume-input', type='number', placeholder="Enter ml...", style={'display': 'none', 'marginTop': '5px'})], width=3),
                                     dbc.Col([dbc.Label("Stock %"), dbc.Input(id='new-stock-percent', type='number', value=100)], width=2),
-                                    dbc.Col([dbc.Label("Qty"), dbc.Input(id='new-bottle-count', type='number', value=1)], width=1),
+                                    dbc.Col([dbc.Label("Qty"), dbc.Input(id='new-bottle-count', type='number', value=1)], width=2),
                                 ], className="mb-2 g-2"),
 
                                 # Limited / Special / Gift
@@ -2249,7 +2312,7 @@ def handle_wheel_click(click_data, targets, nose_val, nose_opts, pal_val, pal_op
 )
 def rvfm_auto_value(nage, nabv, nrar, ntype, price, discount_amount):
     try:
-        if nage is None or nabv is None or not nrar or ntype != "Single Malt Whisky" or price is None or float(price) <= 0:
+        if  nabv is None or not nrar or ntype != "Single Malt Whisky" or price is None or float(price) <= 0:
             return "Missing Data!"
 
         try:
@@ -3360,8 +3423,17 @@ def load_bottle_data(bottle_id):
         best_bef_str = _fmt_date(best_bef)
         best_txt = f"Best Before: {best_bef_str}"
         
-        s_score    = _safe_float(r.get('final_smoky_sweet_score'))
-        r_score    = _safe_float(r.get('final_richness_score'))
+        # חישוב על בסיס ה-flavors העדכניים (מה-history אם קיים)
+        r_score, s_score = compute_flavor_scores_from_flavors(
+            nose_values, palette_values, abv_value
+        )
+
+        # fallback לציון מה-DB אם החישוב נכשל
+        if r_score is None:
+            r_score = _safe_float(r.get('final_richness_score'))
+        if s_score is None:
+            s_score = _safe_float(r.get('final_smoky_sweet_score'))
+            
         sweet_lbl  = f"{get_sweetness_label(s_score)} - {round(s_score, 3)}" if s_score is not None else None
         rich_lbl   = f"{get_richness_label(r_score)} - {round(r_score, 3)}"  if r_score is not None else None
 
