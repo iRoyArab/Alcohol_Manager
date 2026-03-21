@@ -493,7 +493,7 @@ def get_all_data_as_df():
            t2.final_smoky_sweet_score, t2.final_richness_score,
            t2.finish_strength_score, t2.Est_Finish_Strength,
            t2.finish_length_score, t2.Est_Finish_Length,
-            t3.avg_consumption_vol_per_day, t3.est_consumption_date, t3.predicted_finish_date, t3.Best_Before, t3.rvfm
+            t3.avg_consumption_vol_per_day, t3.est_consumption_date, t3.predicted_finish_date, t3.Best_Before, t3.latest_consumption_time, t3.rvfm
     FROM `{TABLE_REF}` t1
     LEFT JOIN `{VIEW_REF}` t2 ON t1.bottle_name = t2.bottle_name AND t1.distillery = t2.distillery
     LEFT JOIN `{FORECAST_TABLE_REF}` t3 ON t1.bottle_id = t3.bottle_id
@@ -1679,7 +1679,10 @@ def mobile_upload(session_id):
                 clean_text = clean_text[3:-3]
             
             json_result = json.loads(clean_text)
-            
+            # אם ה-AI החזיר list, קח את האלמנט הראשון
+            if isinstance(json_result, list):
+                json_result = json_result[0] if json_result else {}        
+                
             # שמירה בזיכרון
             SCAN_SESSIONS[session_id] = {
                 'status': 'done',
@@ -3416,6 +3419,11 @@ def load_bottle_data(bottle_id):
         current_ml = int(meta["vol"] * (meta["stock"] / 100.0))
         pred_finish = r.get("predicted_finish_date") if isinstance(r, dict) else getattr(r, "predicted_finish_date", None)
         best_bef = r.get("Best_Before") if isinstance(r, dict) else getattr(r, "Best_Before", None)
+        
+        latest_up = r.get("latest_consumption_time") if isinstance(r, dict) else getattr(r, "latest_consumption_time", None)
+        latest_cons = _fmt_date(latest_up)
+        latest_txt = f"Latest Consumption: {latest_cons}"
+        
         pred_finish_str = _fmt_date(pred_finish)
          
         pred_txt  = f"Predicted finish: {pred_finish_str}"
@@ -3450,6 +3458,7 @@ def load_bottle_data(bottle_id):
             ], className="mb-2"),
             html.Div([dbc.Badge(pred_txt, color="warning", pill=True, className="me-2"),
                 html.Span(best_txt, style=badge_style_best_before(best_bef)),
+                dbc.Badge(latest_txt,color="primary", pill=True, className="me-2")
                 ],className="mb-2"),
             html.Div(flavor_spans) if flavor_spans else None,
         ])
