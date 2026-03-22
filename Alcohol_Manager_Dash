@@ -679,6 +679,111 @@ def nfc_bottle_trigger(bottle_id):
 
 
 # --- Layout ---
+# WHISKY SOMMELIER — CALLBACKS
+# ============================================================
+
+import plotly.graph_objects as go
+
+# Helper: build a polar segment wheel figure
+def _build_sommelier_wheel(categories, selected, colors):
+    """
+    Build a Plotly barpolar figure for the sommelier step wheels.
+    categories : list of str
+    selected   : list of str (currently selected)
+    colors     : list of hex color strings
+    """
+    n = len(categories)
+    r_val = [1] * n
+    theta = [i * (360 / n) for i in range(n)]
+    width = [360 / n] * n
+
+    bar_colors = []
+    for i, cat in enumerate(categories):
+        base = colors[i]
+        if cat in selected:
+            bar_colors.append(base)
+        else:
+            h = base.lstrip('#')
+            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+            bar_colors.append(f'rgba({r},{g},{b},0.25)')
+
+    fig = go.Figure()
+
+
+    for i, (cat, col) in enumerate(zip(categories, bar_colors)):
+        fig.add_trace(go.Barpolar(
+            r=[1],
+            theta=[theta[i]],
+            width=[360 / n - 2],
+            base=[0],
+            marker_color=[col],
+            marker_line_color='white',
+            marker_line_width=2,
+            name=cat,
+            customdata=[cat],
+            hovertemplate='<b>%{customdata}</b><extra></extra>',
+
+        ))
+
+    fig.update_layout(
+        polar=dict(
+            radialaxis=dict(visible=False, range=[0, 1.2]),
+            angularaxis=dict(
+                showticklabels=True,
+                tickvals=theta,
+                ticktext=[f"<b>✦ {c}</b>" if c in selected else f"<b>{c}</b>" for c in categories],
+                tickfont=dict(size=13, color='#333', family='Arial Black, Arial, sans-serif'),
+                direction='clockwise',
+                rotation=90,
+
+            ),
+            bgcolor='rgba(0,0,0,0)',
+        ),
+        showlegend=False,
+        margin=dict(t=20, b=20, l=20, r=20),
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        height=360,
+        clickmode='event',
+    )
+    return fig
+
+
+# Flavor wheel constants
+_FLAVOR_CATS = [
+    'Very Sweet', 'Sweet-Citrucy', 'Citrucy-Spicy',
+    'Coffee Like - Sea Salt', 'Minerals - Sulfur',
+    'Ash - BBQ Smoke', 'Heavy Peat - Medicinal Smoke'
+]
+_FLAVOR_COLORS = [
+    '#FAC775', '#97C459', '#5DCAA5',
+    '#85B7EB', '#AFA9EC', '#B4B2A9', '#F09595'
+]
+
+# Body wheel constants
+_BODY_CATS = [
+    'Very Watery', 'Very Delicate', 'Delicate',
+    'Full Body', 'Rich', 'Very Rich', 'Syrup Like'
+]
+_BODY_COLORS = [
+    '#B5D4F4', '#9FE1CB', '#C0DD97',
+    '#FAC775', '#EF9F27', '#F0997B', '#F4C0D1'
+]
+
+# Pre-built default figures (empty selection) — used in layout so wheel renders on first load
+_FLAVOR_WHEEL_DEFAULT = _build_sommelier_wheel(_FLAVOR_CATS, [], _FLAVOR_COLORS)
+_BODY_WHEEL_DEFAULT   = _build_sommelier_wheel(_BODY_CATS,   [], _BODY_COLORS)
+
+# ABV store → (min, max) range map
+_ABV_RANGES = {
+    's1': (40.0,  46.0),
+    's2': (46.1,  53.0),
+    's3': (53.0,  57.0),
+    's4': (57.1,  60.0),
+    's5': (60.1,  65.0),
+    's6': (65.1,  70.0),
+}
+
 app.layout = dbc.Container(fluid=True, style={"maxWidth": "1600px"}, children=[
 
     dcc.Store(id='bottle-meta-store'),
@@ -1582,6 +1687,198 @@ app.layout = dbc.Container(fluid=True, style={"maxWidth": "1600px"}, children=[
                 dcc.Store(id='page-store', data=0) 
             ]))
         ]),
+
+        # ============================================================
+        # TAB 4: THE WHISKY EXPERT (Sommelier)
+        # ============================================================
+        dbc.Tab(label="🥃 Whisky Expert", children=[
+            dbc.Container(fluid=True, className="py-4", children=[
+
+                # Header
+                dbc.Row(dbc.Col(html.Div([
+                    html.H2("🥃 The Whisky Expert", className="text-center mb-1 fw-bold"),
+                    html.P("Answer a few questions and we'll find your perfect dram from the collection.",
+                           className="text-center text-muted mb-0"),
+                ]))),
+
+                html.Hr(),
+
+                # Progress bar
+                dbc.Row(dbc.Col(html.Div([
+                    dbc.Progress(value=0, id='som-progress',
+                                 style={'height': '6px', 'borderRadius': '3px'}, color='warning'),
+                    html.Small(id='som-step-label', children="Step 1 of 4",
+                               className="text-muted d-block text-center mt-1"),
+                ]), width={"size": 8, "offset": 2}), className="mb-4"),
+
+                # ── STEP 1: Whisky Type ──────────────────────────────────
+                html.Div(id='som-step1', children=[
+                    dbc.Row(dbc.Col(html.H5("What type of whisky do you prefer?",
+                                            className="text-center fw-semibold mb-3"),
+                                    width={"size": 8, "offset": 2})),
+                    dbc.Row([
+                        dbc.Col(
+                            html.Div(
+                                dbc.Card([
+                                    dbc.CardBody([
+                                        html.Div("🏔️", style={'fontSize': '2.2rem', 'textAlign': 'center'}),
+                                        html.H5("Single Malt Scotch", className="text-center mt-2 mb-1 fw-semibold"),
+                                        html.P("One distillery, 100% malted barley — the purist's choice.",
+                                               className="text-muted text-center small"),
+                                    ])
+                                ], outline=True, color="secondary",
+                                   style={'transition': 'all .15s', 'height': '100%'},
+                                   id='som-card-single-inner'),
+                                id='som-card-single', n_clicks=0,
+                                style={'cursor': 'pointer'},
+                            ),
+                            width=4, className="mx-auto"
+                        ),
+                        dbc.Col(
+                            html.Div(
+                                dbc.Card([
+                                    dbc.CardBody([
+                                        html.Div("🎭", style={'fontSize': '2.2rem', 'textAlign': 'center'}),
+                                        html.H5("Blended Scotch", className="text-center mt-2 mb-1 fw-semibold"),
+                                        html.P("Master blender craft, layered complexity — approachable elegance.",
+                                               className="text-muted text-center small"),
+                                    ])
+                                ], outline=True, color="secondary",
+                                   style={'transition': 'all .15s', 'height': '100%'},
+                                   id='som-card-blended-inner'),
+                                id='som-card-blended', n_clicks=0,
+                                style={'cursor': 'pointer'},
+                            ),
+                            width=4, className="mx-auto"
+                        ),
+                    ], justify="center", className="mb-4"),
+                    dcc.Store(id='som-type-store', data=None),
+                    dbc.Row(dbc.Col(
+                        dbc.Button("Continue →", id='som-btn-1', color="warning", disabled=True,
+                                   className="d-block mx-auto px-5"),
+                        width={"size": 4, "offset": 4}
+                    )),
+                ]),
+
+                # ── STEP 2: Flavor Wheel ────────────────────────────────
+                html.Div(id='som-step2', style={'display': 'none'}, children=[
+                    dbc.Row(dbc.Col(html.H5("Which flavor profiles appeal to you?",
+                                            className="text-center fw-semibold mb-1"),
+                                    width={"size": 8, "offset": 2})),
+                    dbc.Row(dbc.Col(html.Small("Select one or more — click a segment or a badge.",
+                                               className="text-muted d-block text-center mb-3"))),
+                    dbc.Row([
+                        dbc.Col(
+                            dcc.Graph(id='som-flavor-wheel', config={'displayModeBar': False},
+                                      style={'height': '360px'}, figure=_FLAVOR_WHEEL_DEFAULT),
+                            width=6
+                        ),
+                        dbc.Col(
+                            html.Div(id='som-flavor-badges',
+                                     className="d-flex flex-wrap align-items-center align-content-center gap-2 h-100"),
+                            width=6, className="d-flex align-items-center"
+                        ),
+                    ], className="mb-4"),
+                    dcc.Store(id='som-flavor-store', data=[]),
+                    dbc.Row([
+                        dbc.Col(dbc.Button("✕ Clear selection", id='som-reset-flavor', color="link",
+                                           size="sm", className="d-block mx-auto text-muted"), width=12, className="text-center mb-2"),
+                        dbc.Col(dbc.Button("Continue →", id='som-btn-2', color="warning", disabled=True,
+                                   className="d-block mx-auto px-5"), width={"size": 4, "offset": 4}),
+                    ]),
+                ]),
+
+                # ── STEP 3: Body / Texture Wheel ────────────────────────
+                html.Div(id='som-step3', style={'display': 'none'}, children=[
+                    dbc.Row(dbc.Col(html.H5("What texture do you enjoy?",
+                                            className="text-center fw-semibold mb-1"),
+                                    width={"size": 8, "offset": 2})),
+                    dbc.Row(dbc.Col(html.Small("Select one or more — click a segment or a badge.",
+                                               className="text-muted d-block text-center mb-3"))),
+                    dbc.Row([
+                        dbc.Col(
+                            dcc.Graph(id='som-body-wheel', config={'displayModeBar': False},
+                                      style={'height': '360px'}, figure=_BODY_WHEEL_DEFAULT),
+                            width=6
+                        ),
+                        dbc.Col(
+                            html.Div(id='som-body-badges',
+                                     className="d-flex flex-wrap align-items-center align-content-center gap-2 h-100"),
+                            width=6, className="d-flex align-items-center"
+                        ),
+                    ], className="mb-4"),
+                    dcc.Store(id='som-body-store', data=[]),
+                    dbc.Row([
+                        dbc.Col(dbc.Button("✕ Clear selection", id='som-reset-body', color="link",
+                                           size="sm", className="d-block mx-auto text-muted"), width=12, className="text-center mb-2"),
+                        dbc.Col(dbc.Button("Continue →", id='som-btn-3', color="warning", disabled=True,
+                                   className="d-block mx-auto px-5"), width={"size": 4, "offset": 4}),
+                    ]),
+                ]),
+
+                # ── STEP 4: ABV Strength ────────────────────────────────
+                html.Div(id='som-step4', style={'display': 'none'}, children=[
+                    dbc.Row(dbc.Col(html.H5("How strong do you like your dram?",
+                                            className="text-center fw-semibold mb-3"),
+                                    width={"size": 8, "offset": 2})),
+                    dbc.Row(
+                        [dbc.Col(
+                            html.Div(
+                                dbc.Card([
+                                    dbc.CardBody([
+                                        html.Div(label, className="fw-semibold text-center",
+                                                 style={'fontSize': '13px'}),
+                                        html.Div(sub, className="text-muted text-center",
+                                                 style={'fontSize': '11px'}),
+                                    ])
+                                ], id=f'som-abv-card-{val}-inner', outline=True, color="secondary",
+                                   style={'transition': 'all .15s', 'minHeight': '64px', 'height': '100%'}),
+                                id=f'som-abv-card-{val}', n_clicks=0,
+                                style={'cursor': 'pointer'},
+                            ),
+                            width=2
+                        ) for val, label, sub in [
+                            ('s1', '40 – 46%',   'Entry'),
+                            ('s2', '46.1 – 53%', 'Natural'),
+                            ('s3', '53 – 57%',   'Cask'),
+                            ('s4', '57.1 – 60%', 'High'),
+                            ('s5', '60.1 – 65%', 'Ultra'),
+                            ('s6', '65.1 – 70%', 'Barrel'),
+                        ]],
+                        justify="center", className="mb-4 g-2"
+                    ),
+                    dcc.Store(id='som-abv-store', data=[]),
+                    dbc.Row([
+                        dbc.Col(dbc.Button("✕ Clear selection", id='som-reset-abv', color="link",
+                                           size="sm", className="d-block mx-auto text-muted"), width=12, className="text-center mb-2"),
+                        dbc.Col(dbc.Button("Find my dram 🥃", id='som-btn-4', color="warning", disabled=True,
+                                   className="d-block mx-auto px-5"), width={"size": 4, "offset": 4}),
+                    ]),
+                ]),
+
+                # ── STEP 5: Results ─────────────────────────────────────
+                html.Div(id='som-step5', style={'display': 'none'}, children=[
+                    dbc.Row(dbc.Col(html.H5("Your recommended drams",
+                                            className="text-center fw-bold mb-1"),
+                                    width={"size": 8, "offset": 2})),
+                    dbc.Row(dbc.Col(
+                        html.Small(id='som-results-subtitle',
+                                   className="text-muted d-block text-center mb-4")
+                    )),
+                    html.Div(id='som-results-list'),
+                    dbc.Row(dbc.Col(
+                        dbc.Button("← Start over", id='som-reset-btn', color="secondary", outline=True,
+                                   className="d-block mx-auto mt-4 px-5"),
+                        width={"size": 4, "offset": 4}
+                    )),
+                ]),
+
+                # Step state store
+                dcc.Store(id='som-step-store', data=1),
+
+            ])
+        ]),
+
     ])
 ], className="pb-5")
 
@@ -5791,6 +6088,451 @@ def nfc_poll_and_load(n):
     bottle_id = PENDING_NFC_BOTTLE
     PENDING_NFC_BOTTLE = None  # ניקוי — לא נטען פעמיים
     return bottle_id
+
+
+# ============================================================
+
+
+def _make_badges(cats, selected, badge_type):
+    return [
+        dbc.Button(
+            [html.Span("✓ ", style={'color': '#2d6a2d'}) if cat in selected else None, cat],
+            id={'type': badge_type, 'index': cat},
+            color='warning' if cat in selected else 'light',
+            outline=cat not in selected,
+            size='sm',
+            className='mb-1',
+            style={'borderRadius': '20px', 'fontSize': '12px'},
+        )
+        for cat in cats
+    ]
+
+
+# ── 1. Type selection → highlight card + enable button ──────────────────────
+@app.callback(
+    Output('som-card-single-inner', 'color'),
+    Output('som-card-blended-inner', 'color'),
+    Output('som-card-single-inner', 'style'),
+    Output('som-card-blended-inner', 'style'),
+    Output('som-type-store', 'data'),
+    Output('som-btn-1', 'disabled'),
+    Input('som-card-single', 'n_clicks'),
+    Input('som-card-blended', 'n_clicks'),
+    State('som-type-store', 'data'),
+    prevent_initial_call=True,
+)
+def som_select_type(n_single, n_blended, current):
+    triggered = ctx.triggered_id
+    chosen = 'Single Malt Whisky' if triggered == 'som-card-single' else 'Blended Scotch Whisky'
+    base_style = {'transition': 'all .15s', 'height': '100%'}
+    sel_style  = {'transition': 'all .15s', 'height': '100%', 'boxShadow': '0 0 0 3px #f0a500'}
+    if chosen == 'Single Malt Whisky':
+        return 'warning', 'secondary', sel_style, base_style, chosen, False
+    else:
+        return 'secondary', 'warning', base_style, sel_style, chosen, False
+
+
+# ── 2. Step navigation (Continue / Find / Reset) ─────────────────────────────
+@app.callback(
+    Output('som-step1',  'style'),
+    Output('som-step2',  'style'),
+    Output('som-step3',  'style'),
+    Output('som-step4',  'style'),
+    Output('som-step5',  'style'),
+    Output('som-step-store', 'data'),
+    Output('som-progress', 'value'),
+    Output('som-step-label', 'children'),
+    Output('som-card-single-inner', 'color', allow_duplicate=True),
+    Output('som-card-blended-inner', 'color', allow_duplicate=True),
+    Output('som-card-single-inner', 'style', allow_duplicate=True),
+    Output('som-card-blended-inner', 'style', allow_duplicate=True),
+    Output('som-type-store', 'data', allow_duplicate=True),
+    Output('som-flavor-store', 'data', allow_duplicate=True),
+    Output('som-body-store', 'data', allow_duplicate=True),
+    Output('som-abv-store', 'data', allow_duplicate=True),
+    Output('som-flavor-wheel', 'figure', allow_duplicate=True),
+    Output('som-body-wheel', 'figure', allow_duplicate=True),
+    Output('som-flavor-badges', 'children', allow_duplicate=True),
+    Output('som-body-badges', 'children', allow_duplicate=True),
+    *[Output(f'som-abv-card-{v}-inner', 'color', allow_duplicate=True) for v in ['s1','s2','s3','s4','s5','s6']],
+    *[Output(f'som-abv-card-{v}-inner', 'style', allow_duplicate=True) for v in ['s1','s2','s3','s4','s5','s6']],
+    Output('som-btn-1', 'disabled', allow_duplicate=True),
+    Output('som-btn-2', 'disabled', allow_duplicate=True),
+    Output('som-btn-3', 'disabled', allow_duplicate=True),
+    Output('som-btn-4', 'disabled', allow_duplicate=True),
+    Input('som-btn-1', 'n_clicks'),
+    Input('som-btn-2', 'n_clicks'),
+    Input('som-btn-3', 'n_clicks'),
+    Input('som-btn-4', 'n_clicks'),
+    Input('som-reset-btn', 'n_clicks'),
+    State('som-step-store', 'data'),
+    prevent_initial_call=True,
+)
+def som_navigate(*args):
+    triggered = ctx.triggered_id
+    _show = {'display': 'block'}
+    _hide = {'display': 'none'}
+
+    step_map = {
+        'som-btn-1': 2,
+        'som-btn-2': 3,
+        'som-btn-3': 4,
+        'som-btn-4': 5,
+        'som-reset-btn': 1,
+    }
+    new_step = step_map.get(triggered, 1)
+    progress = {1: 0, 2: 25, 3: 50, 4: 75, 5: 100}.get(new_step, 0)
+    step_label = f"Step {new_step} of 4" if new_step <= 4 else "Complete!"
+    styles = [_show if i == new_step else _hide for i in range(1, 6)]
+
+    _base_card = {'transition': 'all .15s', 'height': '100%'}
+    _base_abv  = {'transition': 'all .15s', 'minHeight': '64px', 'height': '100%'}
+    _abv_count = 6
+
+    if triggered == 'som-reset-btn':
+        empty_flavor_fig   = _build_sommelier_wheel(_FLAVOR_CATS, [], _FLAVOR_COLORS)
+        empty_body_fig     = _build_sommelier_wheel(_BODY_CATS,   [], _BODY_COLORS)
+        empty_flavor_badges = _make_badges(_FLAVOR_CATS, [], 'som-flavor-badge')
+        empty_body_badges   = _make_badges(_BODY_CATS,   [], 'som-body-badge')
+        abv_colors = ['secondary'] * _abv_count
+        abv_styles = [_base_abv]   * _abv_count
+        return (
+            *styles, new_step, progress, step_label,
+            'secondary', 'secondary',          # card colors
+            _base_card, _base_card,             # card styles
+            None, [], [], [],                   # type/flavor/body/abv stores
+            empty_flavor_fig, empty_body_fig,   # reset wheel figures
+            empty_flavor_badges, empty_body_badges,  # reset badges
+            *abv_colors, *abv_styles,           # reset ABV cards
+            True, True, True, True,             # disable all continue buttons
+        )
+    else:
+        nu = no_update
+        return (
+            *styles, new_step, progress, step_label,
+            nu, nu, nu, nu, nu, nu, nu, nu, nu, nu, nu, nu,
+            *([nu] * _abv_count), *([nu] * _abv_count),
+            nu, nu, nu, nu,
+        )
+
+
+# ── 3. Flavor wheel rendering + badge sync ───────────────────────────────────
+@app.callback(
+    Output('som-flavor-wheel', 'figure'),
+    Output('som-flavor-badges', 'children'),
+    Output('som-flavor-store', 'data'),
+    Output('som-btn-2', 'disabled'),
+    Input('som-flavor-wheel', 'clickData'),
+    Input({'type': 'som-flavor-badge', 'index': ALL}, 'n_clicks'),
+    Input('som-reset-flavor', 'n_clicks'),
+    State('som-flavor-store', 'data'),
+    prevent_initial_call=True,
+)
+def som_flavor_interaction(click_data, badge_clicks, reset_clicks, selected):
+    selected = list(selected or [])
+    triggered = ctx.triggered_id
+
+    if triggered == 'som-reset-flavor':
+        selected = []
+    elif triggered == 'som-flavor-wheel' and click_data:
+        cat = click_data['points'][0].get('customdata') or click_data['points'][0].get('theta')
+        if cat in _FLAVOR_CATS:
+            if cat in selected:
+                selected.remove(cat)
+            else:
+                selected.append(cat)
+    elif isinstance(triggered, dict) and triggered.get('type') == 'som-flavor-badge':
+        cat = triggered['index']
+        if cat in selected:
+            selected.remove(cat)
+        else:
+            selected.append(cat)
+
+    fig = _build_sommelier_wheel(_FLAVOR_CATS, selected, _FLAVOR_COLORS)
+
+    badges = _make_badges(_FLAVOR_CATS, selected, 'som-flavor-badge')
+
+    return fig, badges, selected, len(selected) == 0
+
+
+# ── 4. Body wheel rendering + badge sync ─────────────────────────────────────
+@app.callback(
+    Output('som-body-wheel', 'figure'),
+    Output('som-body-badges', 'children'),
+    Output('som-body-store', 'data'),
+    Output('som-btn-3', 'disabled'),
+    Input('som-body-wheel', 'clickData'),
+    Input({'type': 'som-body-badge', 'index': ALL}, 'n_clicks'),
+    Input('som-reset-body', 'n_clicks'),
+    State('som-body-store', 'data'),
+    prevent_initial_call=True,
+)
+def som_body_interaction(click_data, badge_clicks, reset_clicks, selected):
+    selected = list(selected or [])
+    triggered = ctx.triggered_id
+
+    if triggered == 'som-reset-body':
+        selected = []
+    elif triggered == 'som-body-wheel' and click_data:
+        cat = click_data['points'][0].get('customdata') or click_data['points'][0].get('theta')
+        if cat in _BODY_CATS:
+            if cat in selected:
+                selected.remove(cat)
+            else:
+                selected.append(cat)
+    elif isinstance(triggered, dict) and triggered.get('type') == 'som-body-badge':
+        cat = triggered['index']
+        if cat in selected:
+            selected.remove(cat)
+        else:
+            selected.append(cat)
+
+    fig = _build_sommelier_wheel(_BODY_CATS, selected, _BODY_COLORS)
+
+    badges = _make_badges(_BODY_CATS, selected, 'som-body-badge')
+
+    return fig, badges, selected, len(selected) == 0
+
+
+# ── 5. ABV card selection — multi-select ─────────────────────────────────────
+@app.callback(
+    *[Output(f'som-abv-card-{v}-inner', 'color') for v in ['s1','s2','s3','s4','s5','s6']],
+    *[Output(f'som-abv-card-{v}-inner', 'style') for v in ['s1','s2','s3','s4','s5','s6']],
+    Output('som-abv-store', 'data'),
+    Output('som-btn-4', 'disabled'),
+    *[Input(f'som-abv-card-{v}', 'n_clicks') for v in ['s1','s2','s3','s4','s5','s6']],
+    Input('som-reset-abv', 'n_clicks'),
+    State('som-abv-store', 'data'),
+    prevent_initial_call=True,
+)
+def som_select_abv(*args):
+    triggered = ctx.triggered_id
+    # last arg is State (store), second to last is reset button — extract properly
+    # args = [n_s1..n_s6, n_reset, store_data]
+    store_data = args[-1]
+    vals = ['s1','s2','s3','s4','s5','s6']
+    selected = list(store_data) if isinstance(store_data, list) else []
+
+    if triggered == 'som-reset-abv':
+        selected = []
+    elif isinstance(triggered, str) and triggered.startswith('som-abv-card-'):
+        key = triggered.replace('som-abv-card-', '')
+        if key in selected:
+            selected.remove(key)
+        else:
+            selected.append(key)
+
+    base_style = {'transition': 'all .15s', 'minHeight': '64px', 'height': '100%'}
+    sel_style  = {'transition': 'all .15s', 'minHeight': '64px', 'height': '100%',
+                  'boxShadow': '0 0 0 3px #f0a500'}
+    colors = ['warning' if v in selected else 'secondary' for v in vals]
+    styles = [sel_style if v in selected else base_style for v in vals]
+    return (*colors, *styles, selected, len(selected) == 0)
+
+
+# ── 6. Compute results ────────────────────────────────────────────────────────
+@app.callback(
+    Output('som-results-list', 'children'),
+    Output('som-results-subtitle', 'children'),
+    Input('som-btn-4', 'n_clicks'),
+    State('som-type-store', 'data'),
+    State('som-flavor-store', 'data'),
+    State('som-body-store', 'data'),
+    State('som-abv-store', 'data'),
+    prevent_initial_call=True,
+)
+def som_compute_results(n_clicks, sel_type, sel_flavors, sel_body, sel_abv):
+    if not n_clicks:
+        raise PreventUpdate
+
+    # ── Load data (cache-first) ──────────────────────────────────────────────
+    try:
+        df = get_all_data_as_df()
+    except Exception:
+        return html.P("Could not load collection data.", className="text-danger text-center"), ""
+
+    if df.empty:
+        return html.P("No bottles found in collection.", className="text-muted text-center"), ""
+
+    # Keep only in-stock whisky bottles (hard filter — no red wine, bourbon, etc.)
+    WHISKY_TYPES = {'Single Malt Whisky', 'Blended Scotch Whisky', 'Blended Malt', 'Single Grain', 'Blended Grain'}
+    work = df.copy()
+    if 'alcohol_type' in work.columns:
+        work = work[work['alcohol_type'].isin(WHISKY_TYPES)]
+    if 'stock_status_per' in work.columns:
+        work = work[work['stock_status_per'].fillna(0) > 0]
+
+    # ── Fallback: compute missing richness/smoky_sweet scores from nose+palette ──
+    # Some bottles have NULL in the view — fill them in using the Python scorer
+    for col_r, col_s in [('final_richness_score', 'final_smoky_sweet_score')]:
+        if col_r in work.columns and col_s in work.columns:
+            null_mask = work[col_r].isna() | work[col_s].isna()
+            if null_mask.any() and 'nose' in work.columns and 'palette' in work.columns:
+                for idx in work[null_mask].index:
+                    row = work.loc[idx]
+                    try:
+                        fr, fs = compute_flavor_scores_from_flavors(
+                            row.get('nose') or [],
+                            row.get('palette') or [],
+                            row.get('alcohol_percentage') or 43.0
+                        )
+                        if fr is not None:
+                            work.at[idx, col_r] = fr
+                        if fs is not None:
+                            work.at[idx, col_s] = fs
+                    except Exception:
+                        pass
+
+    # ── Scoring weights: Flavor 40%, Body 30%, ABV 20%, Type 10% ────────────
+    scores = pd.Series(0.0, index=work.index)
+
+    # — Flavor score (40%) ───────────────────────────────────────────────────
+    if sel_flavors and 'final_smoky_sweet_score' in work.columns:
+        flavor_score = pd.Series(0.0, index=work.index)
+        for cat in sel_flavors:
+            lo, hi = SWEETNESS_RANGES.get(cat, (0, 0))
+            in_range = work['final_smoky_sweet_score'].dropna().between(lo, hi, inclusive='both')
+            flavor_score = flavor_score.add(in_range.reindex(flavor_score.index, fill_value=False).astype(float))
+        flavor_score = (flavor_score / max(len(sel_flavors), 1)) * 10
+        scores += flavor_score * 0.40
+
+    # — Body score (30%) ─────────────────────────────────────────────────────
+    if sel_body and 'final_richness_score' in work.columns:
+        body_score = pd.Series(0.0, index=work.index)
+        for cat in sel_body:
+            lo, hi = RICHNESS_RANGES.get(cat, (0, 0))
+            in_range = work['final_richness_score'].dropna().between(lo, hi, inclusive='both')
+            body_score = body_score.add(in_range.reindex(body_score.index, fill_value=False).astype(float))
+        body_score = (body_score / max(len(sel_body), 1)) * 10
+        scores += body_score * 0.30
+
+    # — ABV score (20%) — supports multiple selections ──────────────────────
+    sel_abv_list = sel_abv if isinstance(sel_abv, list) else ([sel_abv] if sel_abv else [])
+    if sel_abv_list and 'alcohol_percentage' in work.columns:
+        abv_score = pd.Series(0.0, index=work.index)
+        for abv_key in sel_abv_list:
+            abv_lo, abv_hi = _ABV_RANGES.get(abv_key, (0, 100))
+            abv_score += work['alcohol_percentage'].between(abv_lo, abv_hi, inclusive='both').astype(float)
+        abv_score = (abv_score / max(len(sel_abv_list), 1)) * 10
+        scores += abv_score * 0.20
+
+    # — Type score (10%) — hard-filtered above, give full points if type matches
+    if sel_type and 'alcohol_type' in work.columns:
+        type_match = (work['alcohol_type'] == sel_type).astype(float) * 10
+        scores += type_match * 0.10
+
+    work = work.copy()
+    work['_som_score'] = scores
+
+    top5 = work.nlargest(5, '_som_score')
+
+    if top5.empty:
+        return html.P("No matching bottles found — try broadening your selections.",
+                      className="text-muted text-center"), ""
+
+    # ── Build result cards ───────────────────────────────────────────────────
+    # Normalize against dimensions actually selected (not fixed 10.0 max)
+    # Each selected dimension contributes its weight × 10 to max_possible
+    max_possible = 0.0
+    if sel_flavors:       max_possible += 0.40 * 10
+    if sel_body:          max_possible += 0.30 * 10
+    if sel_abv_list:      max_possible += 0.20 * 10
+    if sel_type:          max_possible += 0.10 * 10
+    if max_possible == 0: max_possible = 1.0
+
+    top_actual = top5['_som_score'].max()
+    all_zero = top_actual == 0.0
+
+    cards = []
+    for rank, (_, row) in enumerate(top5.iterrows(), 1):
+        raw = row['_som_score']
+        if all_zero:
+            score_pct = max(0, 60 - (rank - 1) * 10)
+        else:
+            score_pct = round((raw / max_possible) * 100)
+            score_pct = min(score_pct, 100)
+        name = row.get('bottle_name', '—')
+        distillery = row.get('distillery', '')
+        region = row.get('region', '')
+        abv_val = row.get('alcohol_percentage', None)
+        alc_type = row.get('alcohol_type', '')
+        richness_lbl = get_richness_label(row['final_richness_score']) \
+            if 'final_richness_score' in row and row.get('final_richness_score') is not None \
+            else '—'
+        sweet_lbl = get_sweetness_label(row['final_smoky_sweet_score']) \
+            if 'final_smoky_sweet_score' in row and row.get('final_smoky_sweet_score') is not None \
+            else '—'
+
+        meta_parts = [p for p in [distillery, region, alc_type] if p]
+        meta_str = ' · '.join(meta_parts)
+        abv_str = f"{abv_val:.1f}%" if abv_val else '—'
+
+        bar_color = '#2ecc71' if score_pct >= 80 else ('#f39c12' if score_pct >= 50 else '#e74c3c')
+
+        cards.append(
+            dbc.Card(
+                dbc.CardBody([
+                    dbc.Row([
+                        # Rank badge
+                        dbc.Col(
+                            html.Div(str(rank), className="fw-bold text-center",
+                                     style={
+                                         'width': '36px', 'height': '36px',
+                                         'borderRadius': '50%',
+                                         'background': '#FFF3CD',
+                                         'color': '#856404',
+                                         'lineHeight': '36px',
+                                         'fontSize': '16px',
+                                         'flexShrink': '0',
+                                     }),
+                            width="auto", className="d-flex align-items-center"
+                        ),
+                        # Name + meta
+                        dbc.Col([
+                            html.Div(name, className="fw-semibold", style={'fontSize': '15px'}),
+                            html.Div(meta_str, className="text-muted small"),
+                            html.Div([
+                                dbc.Badge(abv_str, color="secondary", className="me-1"),
+                                dbc.Badge(richness_lbl, color="info", className="me-1"),
+                                dbc.Badge(sweet_lbl, color="warning", className="me-1"),
+                            ], className="mt-1"),
+                            # Match bar
+                            html.Div([
+                                html.Div(style={
+                                    'height': '4px',
+                                    'width': f'{score_pct}%',
+                                    'background': bar_color,
+                                    'borderRadius': '2px',
+                                    'transition': 'width .4s ease',
+                                })
+                            ], style={
+                                'background': '#eee', 'borderRadius': '2px',
+                                'marginTop': '6px', 'height': '4px'
+                            }),
+                        ]),
+                        # Score
+                        dbc.Col(
+                            html.Div(f"{score_pct}%", className="fw-bold text-end",
+                                     style={'fontSize': '15px', 'color': bar_color}),
+                            width="auto", className="d-flex align-items-center"
+                        ),
+                    ], align="center"),
+                ]),
+                className="mb-3",
+                style={'borderRadius': '12px'},
+            )
+        )
+
+    _abv_parts = [f"{_ABV_RANGES[k][0]}–{_ABV_RANGES[k][1]}%" for k in (sel_abv_list or []) if k in _ABV_RANGES]
+    _abv_str = ', '.join(_abv_parts) if _abv_parts else 'Any'
+    subtitle = (
+        f"Matched {len(sel_flavors or [])} flavor note(s), "
+        f"{len(sel_body or [])} texture preference(s), "
+        f"ABV {_abv_str} · "
+        f"{sel_type or 'Any type'}"
+    )
+
+    return cards, subtitle
 
 
 if __name__ == '__main__':
