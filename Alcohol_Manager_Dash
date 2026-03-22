@@ -3719,7 +3719,11 @@ def load_bottle_data(bottle_id):
         
         latest_up = r.get("latest_consumption_time") if isinstance(r, dict) else getattr(r, "latest_consumption_time", None)
         latest_cons = _fmt_date(latest_up)
-        latest_txt = f"Latest Consumption: {latest_cons}"
+        
+        if int(meta["stock"]) == 100:
+            latest_txt = f"Latest Consumption: Closed"
+        else:    
+            latest_txt = f"Latest Consumption: {latest_cons}"
         
         pred_finish_str = _fmt_date(pred_finish)
          
