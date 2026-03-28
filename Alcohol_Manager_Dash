@@ -495,7 +495,7 @@ def get_all_data_as_df():
            t2.finish_length_score, t2.Est_Finish_Length,
             t3.avg_consumption_vol_per_day, t3.est_consumption_date, t3.predicted_finish_date, t3.Best_Before, t3.latest_consumption_time, t3.rvfm
     FROM `{TABLE_REF}` t1
-    LEFT JOIN `{VIEW_REF}` t2 ON t1.bottle_name = t2.bottle_name AND t1.distillery = t2.distillery
+    LEFT JOIN `{VIEW_REF}` t2 ON t1.bottle_id = t2.bottle_id
     LEFT JOIN `{FORECAST_TABLE_REF}` t3 ON t1.bottle_id = t3.bottle_id
     """
     
