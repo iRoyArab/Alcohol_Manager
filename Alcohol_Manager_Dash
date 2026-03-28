@@ -336,7 +336,7 @@ except Exception as e:
     
 model='gemini-2.0-flash'
 
-app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], title="Alcohol Manager",
+app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], title="Alcohol Manager v101",
                 suppress_callback_exceptions=True)
 
 
@@ -483,8 +483,8 @@ def create_dynamic_input(id_base, label, is_repeated=False):
 CACHE_DATA = {"df": None, "last_update": 0}
 
 def get_all_data_as_df():
-    # בדיקה אם צריך לרענן (למשל כל 5 דקות)
-    if CACHE_DATA["df"] is not None and (time.time() - CACHE_DATA["last_update"] < 300):
+    # בדיקה אם צריך לרענן (למשל כל שעה)
+    if CACHE_DATA["df"] is not None and (time.time() - CACHE_DATA["last_update"] < 3600):
         return CACHE_DATA["df"]
 
     # השאילתה המלאה - מביאה את כל המידע בפעם אחת
@@ -1593,7 +1593,37 @@ app.layout = dbc.Container(fluid=True, style={"maxWidth": "1600px"}, children=[
                                 options=[{'label': k, 'value': k} for k in RICHNESS_RANGES.keys()]
                             )
                         ], width=6),
-                    ], className="mb-3")
+                    ], className="mb-3"),
+                    dbc.Row([
+                        dbc.Col([
+                            dbc.Label("💥 Finish Strength"),
+                            dcc.Dropdown(
+                                id='search-finish-strength',
+                                multi=True,
+                                placeholder="Select finish strength...",
+                                options=[
+                                    {'label': 'Light',   'value': 'Light'},
+                                    {'label': 'Medium',  'value': 'Medium'},
+                                    {'label': 'Strong',  'value': 'Strong'},
+                                    {'label': 'Intense', 'value': 'Intense'},
+                                ]
+                            )
+                        ], width=6),
+                        dbc.Col([
+                            dbc.Label("⏱️ Finish Length"),
+                            dcc.Dropdown(
+                                id='search-finish-length',
+                                multi=True,
+                                placeholder="Select finish length...",
+                                options=[
+                                    {'label': 'Short',   'value': 'Short'},
+                                    {'label': 'Medium',  'value': 'Medium'},
+                                    {'label': 'Long',    'value': 'Long'},
+                                    {'label': 'Endless', 'value': 'Endless'},
+                                ]
+                            )
+                        ], width=6),
+                    ], className="mb-3"),
                 ]),
 
                 # --- General Filters ---
@@ -4543,12 +4573,11 @@ def handle_save_modal(n_save, n_close, n_confirm, is_open, meta, stock, nose, pa
 
 from google.cloud import bigquery
 
-# 6. EXECUTE UPDATE (Clean Transaction)
+# 6. EXECUTE UPDATE (v101 — fast: no scripting, Python-driven logic)
 @app.callback(
     [Output('alert-output', 'children'),
      Output('alert-output', 'is_open'),
      Output('alert-output', 'color'),
-     Output('update-selector', 'options'),
      Output('update-selector', 'value', allow_duplicate=True),
      Output('stock-slider', 'value', allow_duplicate=True),
      Output('upd-nose-manual', 'value'),
@@ -4570,9 +4599,11 @@ from google.cloud import bigquery
 def execute_update(n, meta, stock, nose, palette, abv, nose_man, pal_man, glasses_cnt, drinkers, drinker_man):
 
     if not n or not meta or not client:
-        return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
+        return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
 
     try:
+        from datetime import date as _date, datetime as _datetime
+
         # ---- Merge arrays ----
         final_nose = list(nose) if nose else []
         if nose_man:
@@ -4588,135 +4619,95 @@ def execute_update(n, meta, stock, nose, palette, abv, nose_man, pal_man, glasse
             safe = [f"'{str(x).replace(chr(39), chr(92)+chr(39))}'" for x in arr]
             return f"[{', '.join(safe)}]"
 
-        sql_nose = sql_array(final_nose)
+        sql_nose    = sql_array(final_nose)
         sql_palette = sql_array(final_palette)
 
-        stock_val = float(stock)
-        is_empty = (stock_val == 0.0)
-        sql_abv = float(abv) if abv is not None else float(meta['orig_abv'])
+        stock_val    = float(stock)
+        is_empty     = (stock_val == 0.0)
+        sql_abv      = float(abv) if abv is not None else float(meta['orig_abv'])
         drams_to_add = int(glasses_cnt or 0)
 
-        # Build drinker_name REPEATED STRING array
         final_drinkers = list(drinkers) if drinkers else []
         if drinker_man:
             final_drinkers.extend([x.strip() for x in str(drinker_man).split(',') if x.strip()])
-        sql_drinkers = "[" + ", ".join(f"'{str(d).replace(chr(39), chr(92)+chr(39))}'" for d in final_drinkers) + "]" if final_drinkers else "[]"
-
-        safe_name = str(meta['name']).replace("'", "\'")
-        bid = int(meta['bid'])
-
-        sql = f"""
-        -- ===== ALL DECLARES MUST BE FIRST (NO IF/SET/UPDATE BEFORE THEM) =====
-        DECLARE upd_ts TIMESTAMP;
-        DECLARE upd_date DATE;
-
-        DECLARE consumption_match BOOL;
-        DECLARE forecasted_bid INT64;
-
-        DECLARE depletion_match BOOL;
-
-        DECLARE consumption_flag_str STRING;
-        DECLARE depletion_flag_str STRING;
-
-        -- ===== Now statements are allowed =====
-        SET upd_ts = CURRENT_TIMESTAMP();
-        SET upd_date = DATE(upd_ts);
-
-        -- consumption_match + forecasted_bid
-        SET consumption_match = EXISTS (
-            SELECT 1
-            FROM `{FORECAST_TABLE_REF}`
-            WHERE DATE(est_consumption_date) = upd_date
-            LIMIT 1
-        );
-
-        SET forecasted_bid = (
-            SELECT bottle_id
-            FROM `{FORECAST_TABLE_REF}`
-            WHERE DATE(est_consumption_date) = upd_date
-            LIMIT 1
-        );
-
-        -- depletion_match (only if stock == 0 exactly)
-        SET depletion_match = FALSE;
-        IF {stock_val} = 0 THEN
-            SET depletion_match = EXISTS (
-                SELECT 1
-                FROM `{FORECAST_TABLE_REF}`
-                WHERE DATE(predicted_finish_date) = upd_date
-                LIMIT 1
-            );
-        END IF;
-
-        -- BOOL -> STRING ('True'/'False') for alcohol_update schema
-        SET consumption_flag_str = IF(consumption_match, 'True', 'False');
-        SET depletion_flag_str   = IF(depletion_match,  'True', 'False');
-
-        -- ===== ONLY UPDATE MAIN TABLE (exactly what you wanted) =====
-        UPDATE `{TABLE_REF}`
-        SET stock_status_per = {stock_val},
-            full_or_empy = {str(is_empty).lower()},
-            updating_time = upd_ts,
-            nose = {sql_nose},
-            palette = {sql_palette},
-            alcohol_percentage = {sql_abv}
-        WHERE bottle_id = {bid};
-
-        -- ===== INSERT NEW ROW INTO alcohol_update =====
-        INSERT INTO `{HISTORY_TABLE_REF}`
-        (
-            update_id,
-            bottle_id,
-            bottle_name,
-            stock_status_per,
-            update_time,
-            nose,
-            palette,
-            alc_pre,
-            drams_counter,
-            consumption_flag,
-            depletion_flag,
-            forecasted_bottle_id,
-            drinker_name
+        sql_drinkers = (
+            "[" + ", ".join(f"'{str(d).replace(chr(39), chr(92)+chr(39))}'" for d in final_drinkers) + "]"
+            if final_drinkers else "[]"
         )
-        VALUES (
-            (SELECT COALESCE(MAX(update_id), 0) + 1 FROM `{HISTORY_TABLE_REF}`),
-            {bid},
-            '{safe_name}',
-            {stock_val},
-            upd_ts,
-            {sql_nose},
-            {sql_palette},
-            {sql_abv},
-            {drams_to_add},
-            consumption_flag_str,
-            depletion_flag_str,
-            IF(consumption_match, forecasted_bid, NULL),
-            {sql_drinkers}
-        );
+
+        safe_name = str(meta['name']).replace("'", "\\'")
+        bid       = int(meta['bid'])
+        today     = _date.today()
+
+        # ── Step 1: Pre-fetch forecast data in Python (1 small query, no scripting) ──
+        forecast_rows = list(client.query(f"""
+            SELECT bottle_id,
+                   DATE(est_consumption_date)  AS ec,
+                   DATE(predicted_finish_date) AS pf
+            FROM `{FORECAST_TABLE_REF}`
+            WHERE DATE(est_consumption_date)  = '{today}'
+               OR DATE(predicted_finish_date) = '{today}'
+        """).result())
+
+        consumption_match = any(r.ec == today for r in forecast_rows)
+        forecasted_bid    = next((r.bottle_id for r in forecast_rows if r.ec == today), None)
+        depletion_match   = is_empty and any(r.pf == today for r in forecast_rows)
+
+        consumption_flag_str = 'True' if consumption_match else 'False'
+        depletion_flag_str   = 'True' if depletion_match   else 'False'
+        forecasted_bid_sql   = str(forecasted_bid) if forecasted_bid is not None else 'NULL'
+
+        # ── Step 2: Pre-fetch next update_id in Python (1 tiny query) ──
+        id_rows  = list(client.query(f"SELECT COALESCE(MAX(update_id), 0) + 1 AS next_id FROM `{HISTORY_TABLE_REF}`").result())
+        next_id  = int(id_rows[0].next_id) if id_rows else 1
+
+        upd_ts_str = _datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S') + ' UTC'
+
+        # ── Step 3: UPDATE main table (simple DML — no scripting) ──
+        sql_update = f"""
+            UPDATE `{TABLE_REF}`
+            SET stock_status_per   = {stock_val},
+                full_or_empy       = {str(is_empty).lower()},
+                updating_time      = TIMESTAMP('{upd_ts_str}'),
+                nose               = {sql_nose},
+                palette            = {sql_palette},
+                alcohol_percentage = {sql_abv}
+            WHERE bottle_id = {bid}
         """
+        client.query(sql_update).result()
 
-        job_config = bigquery.QueryJobConfig(use_legacy_sql=False)
-        client.query(sql, job_config=job_config).result()
+        # ── Step 4: INSERT history row (simple DML — no scripting) ──
+        sql_insert = f"""
+            INSERT INTO `{HISTORY_TABLE_REF}`
+            (update_id, bottle_id, bottle_name, stock_status_per, update_time,
+             nose, palette, alc_pre, drams_counter,
+             consumption_flag, depletion_flag, forecasted_bottle_id, drinker_name)
+            VALUES (
+                {next_id},
+                {bid},
+                '{safe_name}',
+                {stock_val},
+                TIMESTAMP('{upd_ts_str}'),
+                {sql_nose},
+                {sql_palette},
+                {sql_abv},
+                {drams_to_add},
+                '{consumption_flag_str}',
+                '{depletion_flag_str}',
+                {forecasted_bid_sql},
+                {sql_drinkers}
+            )
+        """
+        client.query(sql_insert).result()
 
-        # ---- Refresh caches ----
-        try:
-            CACHE_DATA['last_update'] = 0
-        except Exception:
-            pass
-
-        try:
-            CACHE_HISTORY['last_update'] = 0
-        except Exception:
-            pass
-
-        new_list = fetch_bottle_list_optimized()
+        # ── Invalidate caches ──
+        CACHE_DATA['last_update']    = 0
+        CACHE_HISTORY['last_update'] = 0
 
         return (
             f"✅ Updated {meta['name']}! (+{drams_to_add} drams)",
             True,
             "success",
-            new_list,
             bid,
             100,
             "",
@@ -4727,7 +4718,20 @@ def execute_update(n, meta, stock, nose, palette, abv, nose_man, pal_man, glasse
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return f"❌ Update failed: {e}", True, "danger", no_update, no_update, no_update, no_update, no_update, no_update
+        return f"❌ Update failed: {e}", True, "danger", no_update, no_update, no_update, no_update, no_update
+
+
+# 6b. Refresh update-selector options after successful save (separate fast callback)
+@app.callback(
+    Output('update-selector', 'options', allow_duplicate=True),
+    Input('alert-output', 'is_open'),
+    State('alert-output', 'color'),
+    prevent_initial_call=True
+)
+def refresh_update_selector_after_save(is_open, color):
+    if is_open and color == 'success':
+        return fetch_bottle_list_optimized()
+    return no_update
 
 
 
@@ -5147,6 +5151,8 @@ def toggle_search_mode(mode):
      State('search-mode-toggle', 'value'),
      State('search-sweetness', 'value'),
      State('search-richness', 'value'),
+     State('search-finish-strength', 'value'),
+     State('search-finish-length', 'value'),
      State('search-cask', 'value'),
      State('search-nose', 'value'),
      State('search-palette', 'value'),
@@ -5164,7 +5170,7 @@ def toggle_search_mode(mode):
      State('page-store', 'data'),],
     prevent_initial_call=True
 )
-def search_bottles(n, sort_data, n_prev, n_next,view_mode, txt, mode, sweet_vals, rich_vals, casks, noses, palettes, country, dist, alc_type, 
+def search_bottles(n, sort_data, n_prev, n_next,view_mode, txt, mode, sweet_vals, rich_vals, finish_strength_vals, finish_length_vals, casks, noses, palettes, country, dist, alc_type, 
                    rarity_filter, bb_filter,abv_min, abv_max, age_min, age_max, stock_min, stock_max, page):
     
     # 1. טעינת הנתונים מהזיכרון (מהיר מאוד!)
@@ -5287,6 +5293,12 @@ def search_bottles(n, sort_data, n_prev, n_next,view_mode, txt, mode, sweet_vals
                     mask |= (temp_df['final_richness_score'] >= min_v) & (temp_df['final_richness_score'] <= max_v)
             # === התיקון: הפעלת המסכה על הדאטה-פריים ===
             temp_df = temp_df[mask]
+
+        if finish_strength_vals and 'Est_Finish_Strength' in temp_df.columns:
+            temp_df = temp_df[temp_df['Est_Finish_Strength'].isin(finish_strength_vals)]
+
+        if finish_length_vals and 'Est_Finish_Length' in temp_df.columns:
+            temp_df = temp_df[temp_df['Est_Finish_Length'].isin(finish_length_vals)]
 
         # 3. מיון
         # --------
