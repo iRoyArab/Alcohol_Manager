@@ -500,6 +500,7 @@ def get_all_data_as_df():
     """
     
     df = client.query(query).to_dataframe()
+
     
     # המרת עמודות JSON/Array לרשימות של Python כדי שיהיה קל לסנן
     # ב-BigQuery מערכים חוזרים כ-numpy array, נמיר ל-list רגיל
@@ -576,21 +577,21 @@ def compute_flavor_scores_from_flavors(nose_list, palette_list, abv):
     
     # Lookup scores מתוך flavors_df שכבר בזיכרון
     flavor_lookup = flavors_df.set_index('flavor_name')[['richness_score','smoky_sweet_score']].to_dict('index')
-    
+ 
     matched = [flavor_lookup[f] for f in all_flavors if f in flavor_lookup]
     if not matched:
         return None, None
 
-    unique_count = len(matched)
+    unique_count = len([f for f in all_flavors if f in flavor_lookup])
     raw_richness   = sum(m['richness_score']   for m in matched) / unique_count
     raw_smoky_sweet = sum(m['smoky_sweet_score'] for m in matched) / unique_count
 
     # Flags
     rich       = any(m['richness_score'] == 8.0 for m in matched)
     super_rich = any(m['richness_score'] == 9.0 for m in matched)
-    rich_joker = any(f in ('butterscotch','Marmalade','Chocolate','Coffee','Espresso') for f in all_flavors)
-    bitter     = any(f in ('Dark Chocolate','Coffee','Espresso','Mocha','Tiramisu') for f in all_flavors)
-    light_smoke = any(f in ('Minerals','Sulfur','Meaty','Chalk','Metalic') for f in all_flavors)
+    rich_joker  = any(f.lower() in ('butterscotch','marmalade','chocolate','coffee','espresso') for f in all_flavors)
+    bitter      = any(f.lower() in ('dark chocolate','coffee','espresso','mocha','tiramisu') for f in all_flavors)
+    light_smoke = any(f.lower() in ('minerals','sulfur','meaty','chalk','metalic') for f in all_flavors)
 
     # PenalizedStats
     base_richness = (raw_richness * 0.7 if unique_count < 4 else raw_richness)
@@ -1583,7 +1584,7 @@ app.layout = dbc.Container(fluid=True, style={"maxWidth": "1600px"}, children=[
                                 placeholder="Select sweetness profile...", 
                                 options=[{'label': k, 'value': k} for k in SWEETNESS_RANGES.keys()]
                             )
-                        ], width=6),
+                        ], width=3),
                         dbc.Col([
                             dbc.Label("🍯 Richness & Body Level"),
                             dcc.Dropdown(
@@ -1592,9 +1593,7 @@ app.layout = dbc.Container(fluid=True, style={"maxWidth": "1600px"}, children=[
                                 placeholder="Select richness profile...", 
                                 options=[{'label': k, 'value': k} for k in RICHNESS_RANGES.keys()]
                             )
-                        ], width=6),
-                    ], className="mb-3"),
-                    dbc.Row([
+                        ], width=3),
                         dbc.Col([
                             dbc.Label("💥 Finish Strength"),
                             dcc.Dropdown(
@@ -1608,7 +1607,7 @@ app.layout = dbc.Container(fluid=True, style={"maxWidth": "1600px"}, children=[
                                     {'label': 'Intense', 'value': 'Intense'},
                                 ]
                             )
-                        ], width=6),
+                        ], width=3),
                         dbc.Col([
                             dbc.Label("⏱️ Finish Length"),
                             dcc.Dropdown(
@@ -1622,7 +1621,7 @@ app.layout = dbc.Container(fluid=True, style={"maxWidth": "1600px"}, children=[
                                     {'label': 'Endless', 'value': 'Endless'},
                                 ]
                             )
-                        ], width=6),
+                        ], width=3),
                     ], className="mb-3"),
                 ]),
 
@@ -4669,8 +4668,6 @@ def execute_update(n, meta, stock, nose, palette, abv, nose_man, pal_man, glasse
             SET stock_status_per   = {stock_val},
                 full_or_empy       = {str(is_empty).lower()},
                 updating_time      = TIMESTAMP('{upd_ts_str}'),
-                nose               = {sql_nose},
-                palette            = {sql_palette},
                 alcohol_percentage = {sql_abv}
             WHERE bottle_id = {bid}
         """
@@ -4952,7 +4949,7 @@ def insert_bottles(n, *args):
 def _do_insert(dropdowns, inputs, age, abv, price, disc_price,
                limited, special, gift, discounted, purch, opening,
                stock, qty, rarity, num_dyn):
-    """Shared insert logic used by both direct insert and duplicate-confirmed insert."""
+    """Shared insert logic — uses streaming insert instead of BQ scripting mode."""
 
     def resolve(drop, inp, multi=False):
         if multi:
@@ -4960,59 +4957,92 @@ def _do_insert(dropdowns, inputs, age, abv, price, disc_price,
             base = [v for v in drop if v != 'ADD_NEW_OPTION'] if isinstance(drop, list) and 'ADD_NEW_OPTION' in drop else (drop or [])
             if inp:
                 base.extend([x.strip() for x in inp.split(',') if x.strip()])
-            return [str(x).replace("'", "\'") for x in base]
+            return [str(x).replace("'", "\\'") for x in base]
         val = inp if drop == 'ADD_NEW_OPTION' else drop
         if isinstance(val, str):
-            return val.replace("'", "\'")
+            return val.replace("'", "\\'")
         return val
 
     try:
         qty = int(qty or 1)
-        sql = "BEGIN\nDECLARE start_id INT64;\n"
-        sql += f"SET start_id = (SELECT COALESCE(MAX(bottle_id), 0) FROM `{TABLE_REF}`);\n"
+        now_str = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f") + " UTC"
+
+        # ── 1. Get current MAX IDs (2 fast queries, no scripting) ──────────────
+        r_bottle = list(client.query(f"SELECT COALESCE(MAX(bottle_id), 0) AS m FROM `{TABLE_REF}`").result())
+        r_hist   = list(client.query(f"SELECT COALESCE(MAX(update_id), 0) AS m FROM `{HISTORY_TABLE_REF}`").result())
+        start_id  = int(r_bottle[0].m)
+        start_uid = int(r_hist[0].m)
+
+        # ── 2. Resolve field values once (same for all qty copies) ─────────────
+        val_name         = resolve(dropdowns[0], inputs[0])
+        val_dist         = resolve(dropdowns[1], inputs[1]) or ''
+        val_type         = resolve(dropdowns[2], inputs[2]) or ''
+        val_country      = resolve(dropdowns[3], inputs[3]) or ''
+        val_region       = resolve(dropdowns[4], inputs[4]) or ''
+        val_casks        = resolve(dropdowns[5], inputs[5], True)
+        val_nose         = resolve(dropdowns[6], inputs[6], True)
+        val_pal          = resolve(dropdowns[7], inputs[7], True)
+        val_vol          = int(resolve(dropdowns[8], inputs[8]) or 700)
+        val_discount_amt = resolve(dropdowns[9], inputs[9])
+        val_rarity       = str(rarity) if rarity else None
+
+        # ── 3. Build row dicts ─────────────────────────────────────────────────
+        rows_main = []
+        rows_hist = []
 
         for i in range(1, qty + 1):
-            curr_id  = f"start_id + {i}"
-            val_name = f"'{resolve(dropdowns[0], inputs[0])}'"
-            val_dist = f"'{resolve(dropdowns[1], inputs[1]) or ''}'"
-            val_type = f"'{resolve(dropdowns[2], inputs[2]) or ''}'"
-            val_country = f"'{resolve(dropdowns[3], inputs[3]) or ''}'"
-            val_region  = f"'{resolve(dropdowns[4], inputs[4]) or ''}'"
-            val_casks = list(resolve(dropdowns[5], inputs[5], True))
-            val_nose  = list(resolve(dropdowns[6], inputs[6], True))
-            val_pal   = list(resolve(dropdowns[7], inputs[7], True))
-            val_vol   = resolve(dropdowns[8], inputs[8]) or 700
-            val_rarity = f"'{str(rarity).replace(chr(39), chr(92)+chr(39))}'" if rarity else 'NULL'
+            bid = start_id + i
+            rows_main.append({
+                "bottle_id":            bid,
+                "bottle_name":          val_name,
+                "distillery":           val_dist,
+                "alcohol_type":         val_type,
+                "origin_country":       val_country,
+                "region":               val_region,
+                "casks_aged_in":        val_casks,
+                "nose":                 val_nose,
+                "palette":              val_pal,
+                "age":                  int(age) if age else None,
+                "alcohol_percentage":   float(abv) if abv else None,
+                "price":                float(price) if price else None,
+                "limited_edition":      bool(limited),
+                "special_bottling":     bool(special),
+                "was_a_gift":           bool(gift),
+                "stock_status_per":     float(stock),
+                "full_or_empy":         stock == 0,
+                "orignal_volume":       val_vol,
+                "date_of_purchase":     purch or None,
+                "opening_date":         opening or None,
+                "bottle_counter":       1,
+                "was_discounted":       bool(discounted),
+                "discount_amount":      float(val_discount_amt) if val_discount_amt else None,
+                "discounted_price":     float(disc_price) if disc_price else None,
+                "time_of_registration": now_str,
+                "rarity":               val_rarity,
+            })
+            rows_hist.append({
+                "update_id":        start_uid + i,
+                "bottle_id":        bid,
+                "bottle_name":      val_name,
+                "stock_status_per": float(stock),
+                "update_time":      now_str,
+                "nose":             val_nose,
+                "palette":          val_pal,
+                "alc_pre":          float(abv) if abv else None,
+            })
 
-            sql += f"""
-            INSERT INTO `{TABLE_REF}`
-            (bottle_id, bottle_name, distillery, alcohol_type, origin_country, region,
-             casks_aged_in, nose, palette, age, alcohol_percentage, price,
-             limited_edition, special_bottling, was_a_gift, stock_status_per, full_or_empy,
-             orignal_volume, date_of_purchase, opening_date, bottle_counter,
-             was_discounted, discount_amount, discounted_price, time_of_registration, rarity)
-            VALUES (
-                {curr_id}, {val_name}, {val_dist}, {val_type}, {val_country}, {val_region},
-                {val_casks}, {val_nose}, {val_pal}, {age or 'NULL'}, {abv or 'NULL'}, {price or 'NULL'},
-                {str(limited).lower()}, {str(special).lower()}, {str(gift).lower()},
-                {stock}, {str(stock==0).lower()}, {val_vol}, '{purch}',
-                {f"'{opening}'" if opening else 'NULL'}, 1,
-                {str(discounted).lower()}, {resolve(dropdowns[9], inputs[9]) or 'NULL'},
-                {disc_price or 'NULL'}, CURRENT_TIMESTAMP(), {val_rarity}
-            );
+        # ── 4. Streaming insert (near-instant, no scripting overhead) ──────────
+        tbl_main = client.get_table(TABLE_REF)
+        tbl_hist = client.get_table(HISTORY_TABLE_REF)
 
-            INSERT INTO `{HISTORY_TABLE_REF}`
-            (update_id, bottle_id, bottle_name, stock_status_per, update_time, nose, palette, alc_pre)
-            VALUES (
-                (SELECT COALESCE(MAX(update_id), 0) + 1 FROM `{HISTORY_TABLE_REF}`),
-                {curr_id}, {val_name}, {stock}, CURRENT_TIMESTAMP(),
-                {val_nose}, {val_pal}, {abv or 'NULL'}
-            );
-            """
+        errors1 = client.insert_rows_json(tbl_main, rows_main)
+        errors2 = client.insert_rows_json(tbl_hist, rows_hist)
 
-        sql += "END;"
-        client.query(sql).result()
+        if errors1 or errors2:
+            raise RuntimeError(f"Streaming errors — main: {errors1} | hist: {errors2}")
 
+        # ── 5. Invalidate cache + refresh dropdowns ───────────────────────────
+        CACHE_DATA.clear()
         new_list = fetch_bottle_list_optimized()
         new_opts = fetch_all_dropdown_data()
         opts_list = [new_opts.get(f, []) for f in DYNAMIC_FIELDS_BASE]
