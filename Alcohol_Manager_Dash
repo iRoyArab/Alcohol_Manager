@@ -93,10 +93,10 @@ FLAVOR_ID = "flavor_master_mapping"
 # --- Range Definitions ---
 SWEETNESS_RANGES = {
     'Very Sweet': (0, 1.5),
-    'Sweet-Citrucy': (1.51, 2.0),
-    'Citrucy-Spicy': (2.01, 2.749),
-    'Coffee Like - Sea Salt': (2.75, 4.0),
-    'Minerals - Sulfur': (4.01, 5.5),
+    'Sweet-Citrucy': (1.51, 2.6),
+    'Citrucy-Spicy': (2.61, 3.6),
+    'Coffee Like - Sea Salt': (3.61, 4.5),
+    'Minerals - Sulfur': (4.51, 5.5),
     'Ash - BBQ Smoke': (5.51, 7.5),
     'Heavy Peat - Medicinal Smoke': (7.51, 100.0)
 }
@@ -4660,18 +4660,33 @@ def execute_update(n, meta, stock, nose, palette, abv, nose_man, pal_man, glasse
         id_rows  = list(client.query(f"SELECT COALESCE(MAX(update_id), 0) + 1 AS next_id FROM `{HISTORY_TABLE_REF}`").result())
         next_id  = int(id_rows[0].next_id) if id_rows else 1
 
-        upd_ts_str = _datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S') + ' UTC'
+        upd_ts_str = _datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M:%S') + ' UTC'
 
+        if stock == 100:
         # ── Step 3: UPDATE main table (simple DML — no scripting) ──
-        sql_update = f"""
-            UPDATE `{TABLE_REF}`
-            SET stock_status_per   = {stock_val},
-                full_or_empy       = {str(is_empty).lower()},
-                updating_time      = TIMESTAMP('{upd_ts_str}'),
-                alcohol_percentage = {sql_abv}
-            WHERE bottle_id = {bid}
-        """
-        client.query(sql_update).result()
+            sql_update = f"""
+                UPDATE `{TABLE_REF}`
+                SET stock_status_per   = {stock_val},
+                    full_or_empy       = {str(is_empty).lower()},
+                    updating_time      = TIMESTAMP('{upd_ts_str}'),
+                    nose               = {sql_nose},
+                    palette            = {sql_palette},
+                    alcohol_percentage = {sql_abv}
+                WHERE bottle_id = {bid}
+            """
+            client.query(sql_update).result()
+            
+        else:
+            sql_update = f"""
+                UPDATE `{TABLE_REF}`
+                SET stock_status_per   = {stock_val},
+                    full_or_empy       = {str(is_empty).lower()},
+                    updating_time      = TIMESTAMP('{upd_ts_str}'),
+                    alcohol_percentage = {sql_abv}
+                WHERE bottle_id = {bid}
+            """
+            client.query(sql_update).result()            
+        
 
         # ── Step 4: INSERT history row (simple DML — no scripting) ──
         sql_insert = f"""
