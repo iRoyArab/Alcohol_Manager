@@ -4660,7 +4660,7 @@ def execute_update(n, meta, stock, nose, palette, abv, nose_man, pal_man, glasse
         id_rows  = list(client.query(f"SELECT COALESCE(MAX(update_id), 0) + 1 AS next_id FROM `{HISTORY_TABLE_REF}`").result())
         next_id  = int(id_rows[0].next_id) if id_rows else 1
 
-        upd_ts_str = _datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M:%S') + ' UTC'
+        upd_ts_str = _datetime.now().strftime('%Y-%m-%d %H:%M:%S') + ' UTC'
 
         if stock == 100:
         # ── Step 3: UPDATE main table (simple DML — no scripting) ──
@@ -5401,25 +5401,24 @@ def search_bottles(n, sort_data, n_prev, n_next,view_mode, txt, mode, sweet_vals
         return str(score)
 
     def progress_bar(val):
-        colors = {
-            100: "#006400", 95: "#228B22", 85: "#90EE90", 75: "#FFB347",
-            50: "#FF8C00", 35: "#FA8072", 20: "#B22222", 10: "#8B0000"
-        }
-        bg = "#808080"
-        for threshold, color in sorted(colors.items(), reverse=True):
-            if val >= threshold:
-                bg = color
-                break
-        text_color = "black" if (val < 25 or (35 <= val < 85) or (85 <= val < 100)) else "black"
+        hue = (val / 100) * 120
+        saturation = 80
+        lightness = 25 + (val / 100) * 15
+        bg = f"hsl({hue}, {saturation}%, {lightness}%)"
+
         return html.Div(
             style={'position': 'relative', 'width': '100%', 'height': '22px',
-                    'backgroundColor': 'white', 'border': '1px solid #ccc', 'borderRadius': '4px'},
+                'backgroundColor': 'white', 'border': '1px solid #ccc', 'borderRadius': '4px',
+                'overflow': 'hidden'},
             children=[
                 html.Div(style={'width': f'{val}%', 'height': '100%', 'backgroundColor': bg,
                                 'position': 'absolute', 'transition': 'width 0.5s'}),
-                html.Div(f"{int(val)}%", style={'position': 'absolute', 'width': '100%',
-                                                'textAlign': 'center', 'color': text_color,
-                                                'fontWeight': 'bold', 'lineHeight': '20px'})
+                html.Div(f"{int(val)}%", style={
+                    'position': 'absolute', 'width': f'{val}%', 'height': '100%',
+                    'textAlign': 'right', 'paddingRight': '4px',
+                    'color': 'white', 'fontWeight': 'bold', 'lineHeight': '22px',
+                    'boxSizing': 'border-box', 'overflow': 'hidden', 'whiteSpace': 'nowrap'
+                }),
             ]
         )
         
