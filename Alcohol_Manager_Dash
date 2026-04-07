@@ -4980,7 +4980,7 @@ def _do_insert(dropdowns, inputs, age, abv, price, disc_price,
 
     try:
         qty = int(qty or 1)
-        now_str = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f") + " UTC"
+        now_str = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f") + " UTC"
 
         # ── 1. Get current MAX IDs (2 fast queries, no scripting) ──────────────
         r_bottle = list(client.query(f"SELECT COALESCE(MAX(bottle_id), 0) AS m FROM `{TABLE_REF}`").result())
@@ -5057,7 +5057,8 @@ def _do_insert(dropdowns, inputs, age, abv, price, disc_price,
             raise RuntimeError(f"Streaming errors — main: {errors1} | hist: {errors2}")
 
         # ── 5. Invalidate cache + refresh dropdowns ───────────────────────────
-        CACHE_DATA.clear()
+        CACHE_DATA["df"] = None
+        CACHE_DATA["last_update"] = 0
         new_list = fetch_bottle_list_optimized()
         new_opts = fetch_all_dropdown_data()
         opts_list = [new_opts.get(f, []) for f in DYNAMIC_FIELDS_BASE]
