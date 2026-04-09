@@ -4671,7 +4671,8 @@ def execute_update(n, meta, stock, nose, palette, abv, nose_man, pal_man, glasse
                     updating_time      = TIMESTAMP('{upd_ts_str}'),
                     nose               = {sql_nose},
                     palette            = {sql_palette},
-                    alcohol_percentage = {sql_abv}
+                    alcohol_percentage = {sql_abv},
+                    opening_date       = DATE('{today}')
                 WHERE bottle_id = {bid}
             """
             client.query(sql_update).result()
