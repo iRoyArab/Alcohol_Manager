@@ -336,7 +336,7 @@ except Exception as e:
     
 model='gemini-2.0-flash'
 
-app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], title="Alcohol Manager v101",
+app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], title="Alcohol Manager",
                 suppress_callback_exceptions=True)
 
 
@@ -832,6 +832,19 @@ app.layout = dbc.Container(fluid=True, style={"maxWidth": "1600px"}, children=[
 
     # Store to hold pending insert args while waiting for duplicate confirmation
     dcc.Store(id='pending-insert-store', storage_type='memory'),
+
+    # Add bottle confirmation modal (shows full summary before inserting)
+    dbc.Modal([
+        dbc.ModalHeader(dbc.ModalTitle("🔍 Confirm New Bottle")),
+        dbc.ModalBody(id='add-confirm-modal-body'),
+        dbc.ModalFooter([
+            dbc.Button("Cancel", id="add-confirm-cancel-btn", color="secondary", className="ms-auto", n_clicks=0),
+            dbc.Button("✅ Confirm & Add", id="add-confirm-btn", color="success", n_clicks=0),
+        ]),
+    ], id="add-confirm-modal", is_open=False, size="lg"),
+
+    # Store to hold pending add args while user reviews the summary
+    dcc.Store(id='pending-add-confirm-store', storage_type='memory'),
 
     html.H1("🥃 Alcohol Manager v10.0 - Advanced AI & Filtering", className="my-4 text-center"),
     dbc.Alert(id='alert-output', is_open=False, duration=6000),
@@ -4822,7 +4835,7 @@ def ai_recommend(n):
     except Exception as e:
         return dbc.Alert(f"AI Error: {e}", color="danger")
 
-# Insert Bottle
+# Insert Bottle — v105: shows full summary modal for user confirmation before inserting
 @app.callback(
     [Output('alert-output', 'children', allow_duplicate=True),
      Output('alert-output', 'is_open', allow_duplicate=True),
@@ -4844,7 +4857,10 @@ def ai_recommend(n):
      Output('duplicate-modal-body', 'children'),
      Output('pending-insert-store', 'data'),
      Output('validation_toggle', 'is_open', allow_duplicate=True),
-     Output('validation_modal', 'children', allow_duplicate=True)],
+     Output('validation_modal', 'children', allow_duplicate=True),
+     Output('add-confirm-modal', 'is_open'),
+     Output('add-confirm-modal-body', 'children'),
+     Output('pending-add-confirm-store', 'data')],
     Input('submit-new-btn', 'n_clicks'),
     [State(f'new-{f}-dropdown', 'value') for f in DYNAMIC_FIELDS_BASE] +
     [State(f'new-{f}-input', 'value') for f in DYNAMIC_FIELDS_BASE] +
@@ -4858,15 +4874,18 @@ def ai_recommend(n):
     prevent_initial_call=True
 )
 def insert_bottles(n, *args):
+    # NO_CHANGE must match the full output list (original outputs + 3 new ones)
     NO_CHANGE = (no_update, no_update, no_update, no_update,
                  *[no_update]*len(DYNAMIC_FIELDS_BASE)*2,
                  no_update, no_update, no_update, no_update,
                  no_update, no_update, no_update, no_update, no_update,
                  *[no_update]*len(DYNAMIC_FIELDS_BASE),
+                 False, no_update, no_update,
+                 False, no_update,
                  False, no_update, no_update)
 
     if not n or not client:
-        return no_update
+        return NO_CHANGE
 
     num_dyn = len(DYNAMIC_FIELDS_BASE)
     dropdowns = args[:num_dyn]
@@ -4917,10 +4936,11 @@ def insert_bottles(n, *args):
                 no_update, no_update, no_update, no_update, no_update,
                 *[no_update]*num_dyn,
                 False, no_update, no_update,
-                True, val_msg)
+                True, val_msg,
+                False, no_update, no_update)
 
-    name     = resolve(dropdowns[0], inputs[0])
-    distill  = resolve(dropdowns[1], inputs[1])
+    name    = resolve(dropdowns[0], inputs[0])
+    distill = resolve(dropdowns[1], inputs[1])
 
     # ── DUPLICATE CHECK (uses cached DF — no BQ round-trip) ─────────────────
     try:
@@ -4937,10 +4957,8 @@ def insert_bottles(n, *args):
                 ]),
                 html.P("Do you want to insert another copy anyway?", className="text-muted"),
             ])
-            # Store all args for the confirmed insert
             pending = {
-                "dropdowns": list(dropdowns),
-                "inputs":    list(inputs),
+                "dropdowns": list(dropdowns), "inputs": list(inputs),
                 "age": age, "abv": abv, "price": price, "disc_price": disc_price,
                 "limited": limited, "special": special, "gift": gift,
                 "discounted": discounted, "purch": purch, "opening": opening,
@@ -4952,20 +4970,147 @@ def insert_bottles(n, *args):
                     no_update, no_update, no_update, no_update, no_update,
                     *[no_update]*num_dyn,
                     True, modal_msg, pending,
-                    False, no_update)
+                    False, no_update,
+                    False, no_update, no_update)
     except Exception:
-        pass  # if duplicate check fails, proceed with insert
+        pass  # if duplicate check fails, proceed to summary
 
-    # ── RUN INSERT ────────────────────────────────────────────────────────────
-    return _do_insert(dropdowns, inputs, age, abv, price, disc_price,
-                      limited, special, gift, discounted, purch, opening,
-                      stock, qty, rarity, num_dyn)
+    # ── BUILD SUMMARY & OPEN CONFIRMATION MODAL ──────────────────────────────
+    val_type    = resolve(dropdowns[2], inputs[2]) or '—'
+    val_country = resolve(dropdowns[3], inputs[3]) or '—'
+    val_region  = resolve(dropdowns[4], inputs[4]) or '—'
+    val_casks   = resolve(dropdowns[5], inputs[5], True)
+    val_nose    = resolve(dropdowns[6], inputs[6], True)
+    val_pal     = resolve(dropdowns[7], inputs[7], True)
+    val_vol     = resolve(dropdowns[8], inputs[8]) or 700
+    disc_amt    = resolve(dropdowns[9], inputs[9])
+
+    def yn(v):
+        return "✅ Yes" if v else "❌ No"
+
+    def arr(lst):
+        return ", ".join(lst) if lst else "—"
+
+    summary = html.Div([
+        html.H5([html.B(f"{distill}"), f" — {name}"], className="text-primary mb-3"),
+        html.Hr(),
+        dbc.Row([
+            dbc.Col([
+                html.P([html.B("Type: "),       val_type]),
+                html.P([html.B("Country: "),    val_country]),
+                html.P([html.B("Region: "),     val_region]),
+                html.P([html.B("ABV: "),        f"{abv}%" if abv else "—"]),
+                html.P([html.B("Age: "),        f"{age} years" if age else "NAS"]),
+                html.P([html.B("Volume: "),     f"{val_vol} ml"]),
+                html.P([html.B("Rarity: "),     str(rarity) if rarity else "—"]),
+                html.P([html.B("Quantity: "),   str(qty)]),
+            ], width=6),
+            dbc.Col([
+                html.P([html.B("Price: "),          f"₪{price}" if price else "—"]),
+                html.P([html.B("Discounted Price: "),f"₪{disc_price}" if disc_price else "—"]),
+                html.P([html.B("Discount Amt: "),   f"%{disc_amt}" if disc_amt else "—"]),
+                html.P([html.B("Stock: "),          f"{stock}%"]),
+                html.P([html.B("Purchase Date: "),  purch or "—"]),
+                html.P([html.B("Opening Date: "),   opening or "—"]),
+                html.P([html.B("Limited: "),        yn(limited)]),
+                html.P([html.B("Special: "),        yn(special)]),
+                html.P([html.B("Gift: "),           yn(gift)]),
+                html.P([html.B("Discounted: "),     yn(discounted)]),
+            ], width=6),
+        ]),
+        html.Hr(),
+        html.P([html.B("Casks Aged In: "),  arr(val_casks)]),
+        html.P([html.B("Nose: "),           arr(val_nose)]),
+        html.P([html.B("Palette: "),        arr(val_pal)]),
+        html.Hr(),
+        html.Small("⚠️ Please review all details before confirming.", className="text-muted"),
+    ])
+
+    pending = {
+        "dropdowns": list(dropdowns), "inputs": list(inputs),
+        "age": age, "abv": abv, "price": price, "disc_price": disc_price,
+        "limited": limited, "special": special, "gift": gift,
+        "discounted": discounted, "purch": purch, "opening": opening,
+        "stock": stock, "qty": qty, "rarity": rarity,
+    }
+
+    return ("", False, "danger", no_update,
+            *[no_update]*num_dyn*2,
+            no_update, no_update, no_update, no_update,
+            no_update, no_update, no_update, no_update, no_update,
+            *[no_update]*num_dyn,
+            False, no_update, no_update,
+            False, no_update,
+            True, summary, pending)
+
+
+# ── ADD CONFIRM: user approves or cancels the summary modal ──────────────────
+@app.callback(
+    [Output('alert-output', 'children', allow_duplicate=True),
+     Output('alert-output', 'is_open', allow_duplicate=True),
+     Output('alert-output', 'color', allow_duplicate=True),
+     Output('update-selector', 'options', allow_duplicate=True),
+     *[Output(f'new-{f}-dropdown', 'value', allow_duplicate=True) for f in DYNAMIC_FIELDS_BASE],
+     *[Output(f'new-{f}-input', 'value', allow_duplicate=True) for f in DYNAMIC_FIELDS_BASE],
+     Output('new-age', 'value', allow_duplicate=True),
+     Output('new-abv', 'value', allow_duplicate=True),
+     Output('new-price', 'value', allow_duplicate=True),
+     Output('new-discounted-price', 'value', allow_duplicate=True),
+     Output('new-purchase_date', 'date', allow_duplicate=True),
+     Output('new-opening_date', 'date', allow_duplicate=True),
+     Output('new-stock-percent', 'value', allow_duplicate=True),
+     Output('new-bottle-count', 'value', allow_duplicate=True),
+     Output('new-rarity-dropdown', 'value', allow_duplicate=True),
+     *[Output(f'new-{f}-dropdown', 'options', allow_duplicate=True) for f in DYNAMIC_FIELDS_BASE],
+     Output('duplicate-modal', 'is_open', allow_duplicate=True),
+     Output('duplicate-modal-body', 'children', allow_duplicate=True),
+     Output('pending-insert-store', 'data', allow_duplicate=True),
+     Output('validation_toggle', 'is_open', allow_duplicate=True),
+     Output('validation_modal', 'children', allow_duplicate=True),
+     Output('add-confirm-modal', 'is_open', allow_duplicate=True),
+     Output('add-confirm-modal-body', 'children', allow_duplicate=True),
+     Output('pending-add-confirm-store', 'data', allow_duplicate=True)],
+    [Input('add-confirm-btn', 'n_clicks'),
+     Input('add-confirm-cancel-btn', 'n_clicks')],
+    State('pending-add-confirm-store', 'data'),
+    prevent_initial_call=True
+)
+def handle_add_confirm(n_confirm, n_cancel, pending):
+    num_dyn = len(DYNAMIC_FIELDS_BASE)
+    NO_CHANGE = ("", False, "danger", no_update,
+                 *[no_update]*num_dyn*2,
+                 no_update, no_update, no_update, no_update,
+                 no_update, no_update, no_update, no_update, no_update,
+                 *[no_update]*num_dyn,
+                 False, no_update, no_update,
+                 False, no_update,
+                 False, no_update, no_update)
+
+    if not ctx.triggered_id or not pending:
+        return NO_CHANGE
+
+    # User cancelled — close modal, do nothing
+    if ctx.triggered_id == 'add-confirm-cancel-btn':
+        return NO_CHANGE
+
+    # User confirmed — run the insert
+    result = list(_do_insert(
+        pending['dropdowns'], pending['inputs'],
+        pending['age'], pending['abv'], pending['price'], pending['disc_price'],
+        pending['limited'], pending['special'], pending['gift'], pending['discounted'],
+        pending['purch'], pending['opening'], pending['stock'], pending['qty'],
+        pending['rarity'], num_dyn
+    ))
+    # Append close-modal + clear store to _do_insert's return tuple
+    result += [False, no_update, None]
+    return tuple(result)
 
 
 def _do_insert(dropdowns, inputs, age, abv, price, disc_price,
                limited, special, gift, discounted, purch, opening,
                stock, qty, rarity, num_dyn):
-    """Shared insert logic — uses streaming insert instead of BQ scripting mode."""
+    """Shared insert logic — uses DML INSERT via client.query() so rows are
+    immediately mutable (UPDATE/DELETE) without waiting for streaming buffer flush."""
 
     def resolve(drop, inp, multi=False):
         if multi:
@@ -4979,11 +5124,33 @@ def _do_insert(dropdowns, inputs, age, abv, price, disc_price,
             return val.replace("'", "\\'")
         return val
 
+    def bq_str(v):
+        """Wrap a Python string as a BigQuery string literal, or NULL."""
+        if v is None:
+            return "NULL"
+        return "'" + str(v).replace("'", "\\'") + "'"
+
+    def bq_arr(lst):
+        """Render a Python list as a BigQuery ARRAY<STRING> literal."""
+        if not lst:
+            return "[]"
+        items = ", ".join("'" + str(x).replace("'", "\\'") + "'" for x in lst)
+        return f"[{items}]"
+
+    def bq_num(v):
+        return str(v) if v is not None else "NULL"
+
+    def bq_bool(v):
+        return "TRUE" if v else "FALSE"
+
+    def bq_date(v):
+        return f"DATE '{v}'" if v else "NULL"
+
     try:
         qty = int(qty or 1)
         now_str = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f") + " UTC"
 
-        # ── 1. Get current MAX IDs (2 fast queries, no scripting) ──────────────
+        # ── 1. Get current MAX IDs (2 fast queries) ────────────────────────────
         r_bottle = list(client.query(f"SELECT COALESCE(MAX(bottle_id), 0) AS m FROM `{TABLE_REF}`").result())
         r_hist   = list(client.query(f"SELECT COALESCE(MAX(update_id), 0) AS m FROM `{HISTORY_TABLE_REF}`").result())
         start_id  = int(r_bottle[0].m)
@@ -5002,60 +5169,73 @@ def _do_insert(dropdowns, inputs, age, abv, price, disc_price,
         val_discount_amt = resolve(dropdowns[9], inputs[9])
         val_rarity       = str(rarity) if rarity else None
 
-        # ── 3. Build row dicts ─────────────────────────────────────────────────
-        rows_main = []
-        rows_hist = []
+        # ── 3. Build & execute DML INSERT rows ────────────────────────────────
+        # Rows are written directly to BQ managed storage — immediately mutable.
+        main_value_rows = []
+        hist_value_rows = []
 
         for i in range(1, qty + 1):
             bid = start_id + i
-            rows_main.append({
-                "bottle_id":            bid,
-                "bottle_name":          val_name,
-                "distillery":           val_dist,
-                "alcohol_type":         val_type,
-                "origin_country":       val_country,
-                "region":               val_region,
-                "casks_aged_in":        val_casks,
-                "nose":                 val_nose,
-                "palette":              val_pal,
-                "age":                  int(age) if age else None,
-                "alcohol_percentage":   float(abv) if abv else None,
-                "price":                float(price) if price else None,
-                "limited_edition":      bool(limited),
-                "special_bottling":     bool(special),
-                "was_a_gift":           bool(gift),
-                "stock_status_per":     float(stock),
-                "full_or_empy":         stock == 0,
-                "orignal_volume":       val_vol,
-                "date_of_purchase":     purch or None,
-                "opening_date":         opening or None,
-                "bottle_counter":       1,
-                "was_discounted":       bool(discounted),
-                "discount_amount":      float(val_discount_amt) if val_discount_amt else None,
-                "discounted_price":     float(disc_price) if disc_price else None,
-                "time_of_registration": now_str,
-                "rarity":               val_rarity,
-            })
-            rows_hist.append({
-                "update_id":        start_uid + i,
-                "bottle_id":        bid,
-                "bottle_name":      val_name,
-                "stock_status_per": float(stock),
-                "update_time":      now_str,
-                "nose":             val_nose,
-                "palette":          val_pal,
-                "alc_pre":          float(abv) if abv else None,
-            })
+            uid = start_uid + i
+            main_value_rows.append(f"""(
+                {bid},
+                {bq_str(val_name)},
+                {bq_str(val_dist)},
+                {bq_str(val_type)},
+                {bq_str(val_country)},
+                {bq_str(val_region)},
+                {bq_arr(val_casks)},
+                {bq_arr(val_nose)},
+                {bq_arr(val_pal)},
+                {bq_num(int(age) if age else None)},
+                {bq_num(float(abv) if abv else None)},
+                {bq_num(float(price) if price else None)},
+                {bq_bool(limited)},
+                {bq_bool(special)},
+                {bq_bool(gift)},
+                {bq_num(float(stock))},
+                {bq_bool(stock == 0)},
+                {bq_num(val_vol)},
+                {bq_date(purch)},
+                {bq_date(opening)},
+                1,
+                {bq_bool(discounted)},
+                {bq_num(float(val_discount_amt) if val_discount_amt else None)},
+                {bq_num(float(disc_price) if disc_price else None)},
+                TIMESTAMP '{now_str}',
+                {bq_str(val_rarity)}
+            )""")
+            hist_value_rows.append(f"""(
+                {uid},
+                {bid},
+                {bq_str(val_name)},
+                {bq_num(float(stock))},
+                TIMESTAMP '{now_str}',
+                {bq_arr(val_nose)},
+                {bq_arr(val_pal)},
+                {bq_num(float(abv) if abv else None)}
+            )""")
 
-        # ── 4. Streaming insert (near-instant, no scripting overhead) ──────────
-        tbl_main = client.get_table(TABLE_REF)
-        tbl_hist = client.get_table(HISTORY_TABLE_REF)
+        sql_main = f"""
+            INSERT INTO `{TABLE_REF}`
+            (bottle_id, bottle_name, distillery, alcohol_type, origin_country, region,
+             casks_aged_in, nose, palette, age, alcohol_percentage, price,
+             limited_edition, special_bottling, was_a_gift, stock_status_per,
+             full_or_empy, orignal_volume, date_of_purchase, opening_date,
+             bottle_counter, was_discounted, discount_amount, discounted_price,
+             time_of_registration, rarity)
+            VALUES {', '.join(main_value_rows)}
+        """
+        sql_hist = f"""
+            INSERT INTO `{HISTORY_TABLE_REF}`
+            (update_id, bottle_id, bottle_name, stock_status_per, update_time,
+             nose, palette, alc_pre)
+            VALUES {', '.join(hist_value_rows)}
+        """
 
-        errors1 = client.insert_rows_json(tbl_main, rows_main)
-        errors2 = client.insert_rows_json(tbl_hist, rows_hist)
-
-        if errors1 or errors2:
-            raise RuntimeError(f"Streaming errors — main: {errors1} | hist: {errors2}")
+        # ── 4. Execute both DML statements (rows immediately mutable after) ────
+        client.query(sql_main).result()
+        client.query(sql_hist).result()
 
         # ── 5. Invalidate cache + refresh dropdowns ───────────────────────────
         CACHE_DATA["df"] = None
