@@ -589,7 +589,7 @@ def compute_flavor_scores_from_flavors(nose_list, palette_list, abv):
     # Flags
     rich       = any(m['richness_score'] == 8.0 for m in matched)
     super_rich = any(m['richness_score'] == 9.0 for m in matched)
-    rich_joker  = any(f.lower() in ('butterscotch','marmalade','chocolate','coffee','espresso') for f in all_flavors)
+    rich_joker  = any(f.lower() in ('butterscotch','marmalade','chocolate','coffee','espresso','dark chocolate') for f in all_flavors)
     bitter      = any(f.lower() in ('dark chocolate','coffee','espresso','mocha','tiramisu') for f in all_flavors)
     light_smoke = any(f.lower() in ('minerals','sulfur','meaty','chalk','metalic') for f in all_flavors)
 
@@ -3774,16 +3774,10 @@ def load_bottle_data(bottle_id):
         best_bef_str = _fmt_date(best_bef)
         best_txt = f"Best Before: {best_bef_str}"
         
-        # חישוב על בסיס ה-flavors העדכניים (מה-history אם קיים)
-        r_score, s_score = compute_flavor_scores_from_flavors(
-            nose_values, palette_values, abv_value
-        )
 
-        # fallback לציון מה-DB אם החישוב נכשל
-        if r_score is None:
-            r_score = _safe_float(r.get('final_richness_score'))
-        if s_score is None:
-            s_score = _safe_float(r.get('final_smoky_sweet_score'))
+        r_score = _safe_float(r.get('final_richness_score'))
+
+        s_score = _safe_float(r.get('final_smoky_sweet_score'))
             
         sweet_lbl  = f"{get_sweetness_label(s_score)} - {round(s_score, 3)}" if s_score is not None else None
         rich_lbl   = f"{get_richness_label(r_score)} - {round(r_score, 3)}"  if r_score is not None else None
