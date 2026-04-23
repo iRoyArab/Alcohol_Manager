@@ -316,6 +316,7 @@ except Exception as e:
 TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 HISTORY_TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{HISTORY_TABLE_ID}"
 FORECAST_TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{Forecast_id}"
+CONSUMPTION_VIEW_REF = f"{PROJECT_ID}.{DATASET_ID}.drinker_consumption_analysis_per_month"
 VIEW_REF = f"{PROJECT_ID}.{DATASET_ID}.{VIEW_ID}"
 FLAVORS_REF = f"{PROJECT_ID}.{DATASET_ID}.{FLAVOR_ID}"
 
@@ -544,6 +545,113 @@ def get_history_as_df():
     CACHE_HISTORY["df"] = dfh
     CACHE_HISTORY["last_update"] = time.time()
     return dfh
+
+
+# ─────────────────────────────────────────────────────────────────
+# Drinker Consumption Analytics (v106)
+# ─────────────────────────────────────────────────────────────────
+CACHE_CONSUMPTION = {"df": None, "last_update": 0}
+
+def get_consumption_data_as_df(force_refresh: bool = False):
+    """Fetch the monthly drinker consumption VIEW as a DataFrame, cached for 30 min."""
+    if (not force_refresh
+        and CACHE_CONSUMPTION["df"] is not None
+        and time.time() - CACHE_CONSUMPTION["last_update"] < 1800):
+        return CACHE_CONSUMPTION["df"]
+    if not client:
+        return pd.DataFrame()
+
+    query = f"""
+    SELECT drinker, Month_Year, alc_type, overall_consumption,
+           drinking_days, drink_pace_per_month, total_drams, ml_per_day
+    FROM `{CONSUMPTION_VIEW_REF}`
+    """
+    dfc = client.query(query).to_dataframe()
+
+    # Parse Month_Year ("11-2025") to a real sortable timestamp
+    dfc['month_dt'] = pd.to_datetime(dfc['Month_Year'], format='%m-%Y', errors='coerce')
+    dfc = dfc.sort_values('month_dt').reset_index(drop=True)
+
+    CACHE_CONSUMPTION["df"] = dfc
+    CACHE_CONSUMPTION["last_update"] = time.time()
+    return dfc
+
+
+CACHE_DRINKER_HISTORY = {"df": None, "last_update": 0}
+
+def get_drinker_history_as_df(force_refresh: bool = False):
+    """
+    Fetch full history with bottle metadata across ALL alcohol types.
+    Used for 'top bottles per drinker' analytics. Cached for 5 min.
+    """
+    if (not force_refresh
+        and CACHE_DRINKER_HISTORY["df"] is not None
+        and time.time() - CACHE_DRINKER_HISTORY["last_update"] < 300):
+        return CACHE_DRINKER_HISTORY["df"]
+    if not client:
+        return pd.DataFrame()
+
+    # Threshold: any single WHISKY update that drops more than this many ml
+    # is treated as "initial data load", not a real consumption event.
+    # Wine, liqueur, and other drinks have legitimately large pours (150+ ml),
+    # so the threshold applies ONLY to these two alcohol_type values.
+    # Its drams still count, but its ml is excluded from averages.
+    INVALID_ML_THRESHOLD = 120.0
+    WHISKY_TYPES = ('Single Malt Whisky', 'Blended Scotch Whisky')
+
+    query = f"""
+    WITH h_with_prev AS (
+        SELECT h.update_id, h.bottle_id, h.bottle_name, h.update_time,
+               h.stock_status_per,
+               LAG(h.stock_status_per, 1, 100.0)
+                   OVER (PARTITION BY h.bottle_id ORDER BY h.update_time) AS prev_stock_pct,
+               h.drams_counter, h.drinker_name,
+               w.alcohol_type, w.distillery, w.orignal_volume
+        FROM `{HISTORY_TABLE_REF}` h
+        JOIN `{TABLE_REF}` w ON h.bottle_id = w.bottle_id
+        -- NOTE: don't filter drams_counter here — LAG must see ALL rows
+        -- to compute the correct previous stock percentage.
+    ),
+    h_with_ml AS (
+        SELECT *,
+               GREATEST(
+                   (COALESCE(prev_stock_pct, 100.0) - COALESCE(stock_status_per, 0.0))
+                   * COALESCE(orignal_volume, 700.0) / 100.0,
+                   0.0
+               ) AS ml_dropped_raw,
+               -- Only these two types get the threshold applied
+               (alcohol_type IN {WHISKY_TYPES}) AS is_whisky
+        FROM h_with_prev
+    )
+    SELECT update_id, bottle_id, bottle_name, update_time,
+           drams_counter, drinker_name, alcohol_type, distillery,
+           -- Raw ml dropped — always populated for reference
+           ml_dropped_raw AS ml_consumed_raw,
+           -- is_valid_ml: non-whisky always valid; whisky only if under threshold.
+           -- These still contribute to drams counts, but not to ml totals/averages.
+           (NOT is_whisky OR ml_dropped_raw <= {INVALID_ML_THRESHOLD}) AS is_valid_ml,
+           -- Filtered ml — zero for invalid whisky events, raw value otherwise
+           CASE
+               WHEN is_whisky AND ml_dropped_raw > {INVALID_ML_THRESHOLD} THEN 0.0
+               ELSE ml_dropped_raw
+           END AS ml_consumed
+    FROM h_with_ml
+    WHERE drinker_name IS NOT NULL
+      AND ARRAY_LENGTH(drinker_name) > 0
+      AND COALESCE(drams_counter, 0) > 0
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY update_id ORDER BY update_time) = 1
+    """
+    dfdh = client.query(query).to_dataframe()
+
+    import numpy as np
+    if 'drinker_name' in dfdh.columns:
+        dfdh['drinker_name'] = dfdh['drinker_name'].apply(
+            lambda x: list(x) if isinstance(x, np.ndarray) else ([] if x is None else x)
+        )
+
+    CACHE_DRINKER_HISTORY["df"] = dfdh
+    CACHE_DRINKER_HISTORY["last_update"] = time.time()
+    return dfdh
 
 
 def get_flavors_df():
@@ -1917,6 +2025,68 @@ app.layout = dbc.Container(fluid=True, style={"maxWidth": "1600px"}, children=[
 
                 # Step state store
                 dcc.Store(id='som-step-store', data=1),
+
+            ])
+        ]),
+
+        # ════════════════════════════════════════════════════════════════
+        # TAB: Drinker Analytics (v106)
+        # ════════════════════════════════════════════════════════════════
+        dbc.Tab(label="📊 Drinker Analytics", children=[
+            dbc.Container(fluid=True, className="py-4", children=[
+
+                # Header
+                dbc.Row(dbc.Col(html.Div([
+                    html.H2("📊 Drinker Consumption Analytics",
+                            className="text-center mb-1 fw-bold"),
+                    html.P("Monthly consumption trends, alcohol-type breakdown, and top bottles per drinker.",
+                           className="text-center text-muted mb-3"),
+                ]))),
+
+                # ── Filters row ──
+                dbc.Row([
+                    dbc.Col([
+                        html.Label("Drinker(s)", className="fw-semibold mb-1"),
+                        dcc.Dropdown(id='dca-drinker-filter', multi=True,
+                                     placeholder="All drinkers"),
+                    ], md=4),
+                    dbc.Col([
+                        html.Label("Month(s)", className="fw-semibold mb-1"),
+                        dcc.Dropdown(id='dca-month-filter', multi=True,
+                                     placeholder="All months"),
+                    ], md=4),
+                    dbc.Col([
+                        html.Label("Alcohol Type(s)", className="fw-semibold mb-1"),
+                        dcc.Dropdown(id='dca-alctype-filter', multi=True,
+                                     placeholder="All types"),
+                    ], md=4),
+                ], className="mb-4"),
+
+                # ── KPI cards ──
+                dbc.Row(id='dca-kpi-row', className="mb-4"),
+
+                # ── Charts ──
+                dbc.Row([
+                    dbc.Col(dbc.Card([
+                        dbc.CardHeader(html.H5("📈 Monthly Consumption Trend",
+                                               className="mb-0")),
+                        dbc.CardBody(dcc.Graph(id='dca-trend-chart',
+                                               config={'displayModeBar': False})),
+                    ]), md=8),
+                    dbc.Col(dbc.Card([
+                        dbc.CardHeader(html.H5("🥃 By Alcohol Type",
+                                               className="mb-0")),
+                        dbc.CardBody(dcc.Graph(id='dca-type-pie',
+                                               config={'displayModeBar': False})),
+                    ]), md=4),
+                ], className="mb-4"),
+
+                # ── Top bottles per drinker (separate panel) ──
+                dbc.Card([
+                    dbc.CardHeader(html.H5("🏆 Top Bottles per Drinker",
+                                           className="mb-0")),
+                    dbc.CardBody(html.Div(id='dca-top-bottles-panel')),
+                ]),
 
             ])
         ]),
@@ -4668,8 +4838,9 @@ def execute_update(n, meta, stock, nose, palette, abv, nose_man, pal_man, glasse
         next_id  = int(id_rows[0].next_id) if id_rows else 1
 
         upd_ts_str = _datetime.now().strftime('%Y-%m-%d %H:%M:%S') + ' UTC'
+        orig_stock_before = float(meta.get('orig_stock_resolved', meta.get('stock', 100.0)))
 
-        if stock == 100:
+        if orig_stock_before == 100.0:
         # ── Step 3: UPDATE main table (simple DML — no scripting) ──
             sql_update = f"""
                 UPDATE `{TABLE_REF}`
@@ -4729,7 +4900,7 @@ def execute_update(n, meta, stock, nose, palette, abv, nose_man, pal_man, glasse
             True,
             "success",
             bid,
-            100,
+            stock_val,
             "",
             "",
             0
@@ -6771,5 +6942,272 @@ def som_compute_results(n_clicks, sel_type, sel_flavors, sel_body, sel_abv):
     return cards, subtitle
 
 
+# ════════════════════════════════════════════════════════════════════════
+# DRINKER ANALYTICS CALLBACKS (v106)
+# ════════════════════════════════════════════════════════════════════════
+
+# ── Populate filter options on tab load ──
+@app.callback(
+    [Output('dca-drinker-filter', 'options'),
+     Output('dca-month-filter',   'options'),
+     Output('dca-alctype-filter', 'options')],
+    Input('dca-drinker-filter', 'id'),  # fires once on layout build
+)
+def dca_populate_filters(_trigger):
+    df = get_consumption_data_as_df()
+    if df is None or df.empty:
+        return [], [], []
+
+    # ── Drinkers: union of VIEW + history (some drinkers may be missing
+    # from the consumption VIEW due to its aggregation/filter logic) ──
+    drinkers_set = set(df['drinker'].dropna().unique())
+
+    dfh = get_drinker_history_as_df()
+    if dfh is not None and not dfh.empty and 'drinker_name' in dfh.columns:
+        for arr in dfh['drinker_name']:
+            if isinstance(arr, (list, tuple)):
+                for d in arr:
+                    if d:
+                        drinkers_set.add(str(d).strip())
+
+    drinker_opts = [{'label': d, 'value': d} for d in sorted(drinkers_set)]
+
+    months_sorted = (df[['Month_Year', 'month_dt']]
+                     .dropna()
+                     .drop_duplicates()
+                     .sort_values('month_dt')['Month_Year']
+                     .tolist())
+    month_opts = [{'label': m, 'value': m} for m in months_sorted]
+
+    type_opts = [{'label': t, 'value': t}
+                 for t in sorted(df['alc_type'].dropna().unique())]
+
+    return drinker_opts, month_opts, type_opts
+
+
+def _dca_apply_filters(df, drinkers, months, alc_types):
+    """Apply the three filters; empty/None means 'all'."""
+    out = df.copy()
+    if drinkers:
+        out = out[out['drinker'].isin(drinkers)]
+    if months:
+        out = out[out['Month_Year'].isin(months)]
+    if alc_types:
+        out = out[out['alc_type'].isin(alc_types)]
+    return out
+
+
+# ── KPI cards + Trend + Pie ──
+@app.callback(
+    [Output('dca-kpi-row',     'children'),
+     Output('dca-trend-chart', 'figure'),
+     Output('dca-type-pie',    'figure')],
+    [Input('dca-drinker-filter', 'value'),
+     Input('dca-month-filter',   'value'),
+     Input('dca-alctype-filter', 'value')],
+)
+def dca_update_main(sel_drinkers, sel_months, sel_types):
+    import plotly.express as px
+    import plotly.graph_objects as go
+
+    df = get_consumption_data_as_df()
+    if df is None or df.empty:
+        empty_fig = go.Figure().update_layout(
+            template='plotly_white',
+            annotations=[dict(text="No data", showarrow=False,
+                              xref='paper', yref='paper', x=0.5, y=0.5)]
+        )
+        return [], empty_fig, empty_fig
+
+    f = _dca_apply_filters(df, sel_drinkers, sel_months, sel_types)
+
+    # ─── KPI cards ───
+    if f.empty:
+        kpi_cards = [dbc.Col(dbc.Alert("No rows match the selected filters.",
+                                       color="warning"), width=12)]
+    else:
+        total_ml      = float(f['overall_consumption'].sum())
+        total_drams   = float(f['total_drams'].sum())
+        active_months = f['Month_Year'].nunique()
+        active_drinkers = f['drinker'].nunique()
+
+        def _kpi(title, value, icon, color):
+            return dbc.Col(dbc.Card(dbc.CardBody([
+                html.Div(icon, style={'fontSize': '2rem'}),
+                html.H4(value, className="fw-bold mb-0 mt-2"),
+                html.Small(title, className="text-muted"),
+            ]), className="text-center shadow-sm",
+               style={'borderLeft': f'4px solid {color}'}), md=3)
+
+        kpi_cards = [
+            _kpi("Total Consumption (ml)", f"{total_ml:,.0f}", "🥃", "#8B4513"),
+            _kpi("Total Drams",            f"{total_drams:,.0f}", "🍷", "#722F37"),
+            _kpi("Active Months",          str(active_months),    "📅", "#2E86AB"),
+            _kpi("Active Drinkers",        str(active_drinkers),  "👤", "#A23B72"),
+        ]
+
+    # ─── Monthly trend (line per drinker) ───
+    if f.empty:
+        trend_fig = go.Figure().update_layout(template='plotly_white')
+    else:
+        trend = (f.groupby(['month_dt', 'Month_Year', 'drinker'], as_index=False)
+                  ['overall_consumption'].sum()
+                  .sort_values('month_dt'))
+        trend_fig = px.line(
+            trend, x='Month_Year', y='overall_consumption',
+            color='drinker', markers=True,
+            labels={'overall_consumption': 'Consumption (ml)',
+                    'Month_Year': 'Month'},
+        )
+        trend_fig.update_layout(template='plotly_white',
+                                margin=dict(l=10, r=10, t=10, b=10),
+                                legend_title_text='Drinker')
+
+    # ─── Pie by alcohol type ───
+    if f.empty:
+        pie_fig = go.Figure().update_layout(template='plotly_white')
+    else:
+        pie_data = (f.groupby('alc_type', as_index=False)
+                     ['overall_consumption'].sum()
+                     .sort_values('overall_consumption', ascending=False))
+        pie_fig = px.pie(pie_data, names='alc_type', values='overall_consumption',
+                         hole=0.45)
+        pie_fig.update_traces(textposition='inside', textinfo='percent+label')
+        pie_fig.update_layout(template='plotly_white',
+                              margin=dict(l=10, r=10, t=10, b=10),
+                              showlegend=False)
+
+    return kpi_cards, trend_fig, pie_fig
+
+
+# ── Top bottles per drinker (separate panel — joined with history) ──
+@app.callback(
+    Output('dca-top-bottles-panel', 'children'),
+    [Input('dca-drinker-filter', 'value'),
+     Input('dca-alctype-filter', 'value'),
+     Input('dca-month-filter',   'value')],
+)
+def dca_top_bottles_per_drinker(sel_drinkers, sel_types, sel_months):
+    dfh = get_drinker_history_as_df()
+    if dfh is None or dfh.empty:
+        return dbc.Alert("No history data available.", color="warning")
+
+    # Filter by alcohol type first (history rows are 1-per-update)
+    f = dfh.copy()
+    if sel_types:
+        f = f[f['alcohol_type'].isin(sel_types)]
+
+    # ── Filter by month(s) using update_time → "M-YYYY" ──
+    if sel_months:
+        ut = pd.to_datetime(f['update_time'], errors='coerce', utc=True)
+        # Format without leading zero on month, to match VIEW's "11-2025" / "1-2026"
+        row_month_year = ut.dt.month.astype('Int64').astype(str) + '-' + ut.dt.year.astype('Int64').astype(str)
+        f = f[row_month_year.isin(sel_months)]
+
+    # ── Split drams + ml evenly across co-drinkers on the same row ──
+    # A row with drams_counter=4 and drinker_name=['Roy','Shaked'] means
+    # 2 drams per drinker, not 4 each. Same for ml_consumed.
+    f = f.copy()
+    f['_n_drinkers'] = f['drinker_name'].apply(
+        lambda x: len(x) if isinstance(x, (list, tuple)) and len(x) > 0 else 1
+    )
+    f['drams_per_drinker'] = (
+        pd.to_numeric(f['drams_counter'], errors='coerce').fillna(0)
+        / f['_n_drinkers']
+    )
+    f['ml_per_drinker'] = (
+        pd.to_numeric(f['ml_consumed'], errors='coerce').fillna(0)
+        / f['_n_drinkers']
+    )
+    # Drams from valid-ml rows ONLY — used as denominator for avg ml/dram,
+    # so bulk initial-load events don't dilute the pour-size average.
+    is_valid = f['is_valid_ml'].fillna(False).astype(bool)
+    f['valid_drams_per_drinker'] = f['drams_per_drinker'].where(is_valid, 0.0)
+
+    # Explode drinker_name array → one row per drinker per update
+    f = f.explode('drinker_name').rename(columns={'drinker_name': 'drinker'})
+    f = f[f['drinker'].notna() & (f['drinker'] != '')]
+
+    if sel_drinkers:
+        f = f[f['drinker'].isin(sel_drinkers)]
+
+    if f.empty:
+        return dbc.Alert("No bottles found for the selected filters.",
+                         color="info")
+
+    # Aggregate: sum per-drinker drams + ml + count distinct sessions
+    agg = (f.groupby(['drinker', 'distillery', 'bottle_name'], as_index=False)
+            .agg(total_drams=('drams_per_drinker', 'sum'),
+                 total_ml=('ml_per_drinker', 'sum'),
+                 valid_drams=('valid_drams_per_drinker', 'sum'),
+                 sessions=('update_id', 'nunique')))
+
+    # Average ml per dram → tie-breaker when total_drams is equal.
+    # Denominator uses ONLY valid-ml drams to avoid skew from initial-load rows.
+    agg['avg_ml_per_dram'] = (agg['total_ml'] /
+                              agg['valid_drams'].replace(0, pd.NA)).fillna(0)
+
+    agg = agg.sort_values(
+        ['drinker', 'total_drams', 'avg_ml_per_dram', 'sessions'],
+        ascending=[True, False, False, True],
+    )
+
+    # One card per drinker with top-5 bottles
+    cards = []
+    for drinker, sub in agg.groupby('drinker'):
+        top5 = sub.head(5)
+        rows = []
+        for i, r in enumerate(top5.itertuples(index=False), start=1):
+            medal = {1: '🥇', 2: '🥈', 3: '🥉'}.get(i, f"{i}.")
+            # Show fractional drams cleanly: "3 drams" or "2.5 drams"
+            drams_str = (f"{r.total_drams:.0f}" if float(r.total_drams).is_integer()
+                         else f"{r.total_drams:.1f}")
+            # Prefix distillery when present: "Ardbeg - 10 Year Old"
+            display_name = (f"{r.distillery} - {r.bottle_name}"
+                            if pd.notna(r.distillery) and str(r.distillery).strip()
+                            else r.bottle_name)
+            # Average ml per dram (pour size)
+            avg_ml_str = (f"~{r.avg_ml_per_dram:.0f} ml/dram"
+                          if r.avg_ml_per_dram and r.avg_ml_per_dram > 0
+                          else "—")
+            rows.append(html.Tr([
+                html.Td(medal, style={'width': '40px'}),
+                html.Td(display_name, className="fw-semibold"),
+                html.Td(f"{drams_str} drams",
+                        className="text-end text-muted"),
+                html.Td(avg_ml_str,
+                        className="text-end text-muted",
+                        style={'width': '110px'}),
+                html.Td(f"{r.sessions} sessions",
+                        className="text-end text-muted",
+                        style={'width': '100px'}),
+            ]))
+        # Table header
+        header = html.Thead(html.Tr([
+            html.Th("#", style={'width': '40px'}),
+            html.Th("Bottle"),
+            html.Th("Drams", className="text-end"),
+            html.Th("Avg Pour", className="text-end",
+                    style={'width': '110px'}),
+            html.Th("Sessions", className="text-end",
+                    style={'width': '100px'}),
+        ]))
+
+        cards.append(dbc.Col(dbc.Card([
+            dbc.CardHeader(html.H6(f"👤 {drinker}", className="mb-0 fw-bold")),
+            dbc.CardBody(dbc.Table([header, html.Tbody(rows)],
+                                   borderless=True, hover=True,
+                                   className="mb-0", size="sm")),
+        ], className="shadow-sm h-100"), md=6, className="mb-3"))
+
+    return dbc.Row(cards)
+
+
 if __name__ == '__main__':
+    # Pre-warm consumption analytics caches (v106)
+    try:
+        get_consumption_data_as_df()
+        get_drinker_history_as_df()
+    except Exception as _e:
+        print(f"⚠️ Consumption cache warm-up failed: {_e}")
     app.run(debug=True, host="0.0.0.0", port=8051)
