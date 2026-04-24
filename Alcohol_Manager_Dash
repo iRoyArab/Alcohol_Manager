@@ -2081,6 +2081,18 @@ app.layout = dbc.Container(fluid=True, style={"maxWidth": "1600px"}, children=[
                     ]), md=4),
                 ], className="mb-4"),
 
+                # ── Drinking pace by alcohol type (horizontal bar) ──
+                dbc.Card([
+                    dbc.CardHeader(html.H5("⏱️ Drinking Pace by Alcohol Type",
+                                           className="mb-0")),
+                    dbc.CardBody([
+                        html.Small(id='dca-pace-subtitle',
+                                   className="text-muted d-block mb-2"),
+                        dcc.Graph(id='dca-pace-chart',
+                                  config={'displayModeBar': False}),
+                    ]),
+                ], className="mb-4"),
+
                 # ── Top bottles per drinker (separate panel) ──
                 dbc.Card([
                     dbc.CardHeader(html.H5("🏆 Top Bottles per Drinker",
@@ -7201,6 +7213,94 @@ def dca_top_bottles_per_drinker(sel_drinkers, sel_types, sel_months):
         ], className="shadow-sm h-100"), md=6, className="mb-3"))
 
     return dbc.Row(cards)
+
+
+# ── Drinking Pace by Alcohol Type (v116) ──
+@app.callback(
+    [Output('dca-pace-chart',    'figure'),
+     Output('dca-pace-subtitle', 'children')],
+    [Input('dca-drinker-filter', 'value'),
+     Input('dca-month-filter',   'value'),
+     Input('dca-alctype-filter', 'value')],
+)
+def dca_pace_by_alc_type(sel_drinkers, sel_months, sel_types):
+    import plotly.graph_objects as go
+    import re
+
+    df = get_consumption_data_as_df()
+    empty_fig = go.Figure().update_layout(
+        template='plotly_white',
+        annotations=[dict(text="No data", showarrow=False,
+                          xref='paper', yref='paper', x=0.5, y=0.5)]
+    )
+    if df is None or df.empty:
+        return empty_fig, ""
+
+    # Parse "Every 15 days" / "Every 3.1 days" → 15.0 / 3.1
+    f = df.copy()
+    f['pace_days'] = f['drink_pace_per_month'].apply(
+        lambda s: float(re.search(r'([\d.]+)', str(s or '')).group(1))
+        if re.search(r'([\d.]+)', str(s or '')) else float('nan')
+    )
+
+    # Apply shared filters (months + alc types).
+    # Drinker filter handled separately below (affects aggregation logic).
+    if sel_months:
+        f = f[f['Month_Year'].isin(sel_months)]
+    if sel_types:
+        f = f[f['alc_type'].isin(sel_types)]
+    f = f.dropna(subset=['pace_days', 'alc_type'])
+
+    if f.empty:
+        return empty_fig, "No pace data for the selected filters."
+
+    # ── Aggregation logic ──
+    # - Drinker(s) selected → mean of their pace rows per alc_type
+    # - No drinker selected → mean-of-means (each drinker's per-type mean,
+    #   then averaged across drinkers) to avoid heavy-drinker skew.
+    if sel_drinkers:
+        g = f[f['drinker'].isin(sel_drinkers)]
+        if g.empty:
+            return empty_fig, "No pace data for the selected drinker(s)."
+        by_type = (g.groupby('alc_type', as_index=False)['pace_days']
+                    .mean()
+                    .rename(columns={'pace_days': 'avg_days'}))
+        subtitle = (f"Average days between drinks per alcohol type — "
+                    f"drinker(s): {', '.join(sel_drinkers)}")
+    else:
+        per_drinker = (f.groupby(['drinker', 'alc_type'], as_index=False)
+                         ['pace_days'].mean())
+        by_type = (per_drinker.groupby('alc_type', as_index=False)['pace_days']
+                              .mean()
+                              .rename(columns={'pace_days': 'avg_days'}))
+        subtitle = ("Average days between drinks per alcohol type — "
+                    "averaged across all drinkers")
+
+    # Sort so fastest pace (fewest days) is at the top of the horizontal bar
+    by_type = by_type.sort_values('avg_days', ascending=False)
+
+    fig = go.Figure(go.Bar(
+        x=by_type['avg_days'],
+        y=by_type['alc_type'],
+        orientation='h',
+        text=[f"Every {v:.1f} days" for v in by_type['avg_days']],
+        textposition='outside',
+        marker=dict(
+            color=by_type['avg_days'],
+            colorscale='Tealgrn_r',  # fewer days = greener (more frequent)
+            showscale=False,
+        ),
+        hovertemplate='<b>%{y}</b><br>Every %{x:.2f} days<extra></extra>',
+    ))
+    fig.update_layout(
+        template='plotly_white',
+        margin=dict(l=10, r=40, t=10, b=10),
+        xaxis_title='Days between drinks (lower = more frequent)',
+        yaxis_title=None,
+        height=max(260, 40 * len(by_type) + 80),
+    )
+
+    return fig, subtitle
 
 
 if __name__ == '__main__':
