@@ -335,7 +335,7 @@ except Exception as e:
     print(f"GenAI Init Error: {e}")
     ai_client = None
     
-model='gemini-2.0-flash'
+model='gemini-2.5-flash'
 
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], title="Alcohol Manager",
                 suppress_callback_exceptions=True)
@@ -2180,7 +2180,7 @@ def mobile_upload(session_id):
             from google.genai import types
             
             response = ai_client.models.generate_content(
-                model='gemini-2.0-flash',
+                model='gemini-2.5-flash',
                 contents=[
                     types.Part.from_bytes(data=image_bytes, mime_type=file.content_type),
                     prompt
@@ -3492,7 +3492,7 @@ Return JSON only.
 """.strip()
 
             response = ai_client.models.generate_content(
-                model="gemini-2.0-flash",
+                model="gemini-2.5-flash",
                 contents=prompt,
                 config={
                     "response_mime_type": "application/json",
@@ -5006,7 +5006,7 @@ def ai_recommend(n):
         Format as Markdown with ABV, palette, nose, and estimated price in Shekels (Israeli stores).
         """
         
-        response = ai_client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
+        response = ai_client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
         return dcc.Markdown(response.text)
         
     except Exception as e:
