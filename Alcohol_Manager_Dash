@@ -133,6 +133,19 @@ def _is_dark_bg(hex_color):
     r,g,b = int(h[0:2],16), int(h[2:4],16), int(h[4:6],16)
     return (0.299*r + 0.587*g + 0.114*b) < 140
 
+def _darken_hex(hex_color, factor=0.62):
+    """Return a darker version of a hex color. factor<1 = darker.
+    Used in v119 to make light flavor/richness colors readable."""
+    try:
+        h = hex_color.lstrip('#')
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        r = int(max(0, min(255, r * factor)))
+        g = int(max(0, min(255, g * factor)))
+        b = int(max(0, min(255, b * factor)))
+        return f'#{r:02x}{g:02x}{b:02x}'
+    except Exception:
+        return hex_color
+
 def _lerp_color_by_stops(score, stops):
     s = float(score)
     if s <= stops[0][0]: return stops[0][1]
@@ -494,7 +507,9 @@ def get_all_data_as_df():
            t2.final_smoky_sweet_score, t2.final_richness_score,
            t2.finish_strength_score, t2.Est_Finish_Strength,
            t2.finish_length_score, t2.Est_Finish_Length,
-            t3.avg_consumption_vol_per_day, t3.est_consumption_date, t3.predicted_finish_date, t3.Best_Before, t3.latest_consumption_time, t3.rvfm
+            t3.avg_consumption_vol_per_day, t3.est_next_consumption, t3.predicted_finish_date, t3.Best_Before, t3.latest_consumption_time, t3.rvfm, t3.confidence,
+            t3.frequency_score, t3.recency_score, t3.intensity_score,
+            DATE(t1.updating_time) AS last_update_date
     FROM `{TABLE_REF}` t1
     LEFT JOIN `{VIEW_REF}` t2 ON t1.bottle_id = t2.bottle_id
     LEFT JOIN `{FORECAST_TABLE_REF}` t3 ON t1.bottle_id = t3.bottle_id
@@ -514,6 +529,76 @@ def get_all_data_as_df():
     CACHE_DATA["last_update"] = time.time()
     return df
 
+
+# ---------------------------------------------------------------------
+# v121/v122 — Popularity ranking.
+# Rank = position when bottles WITH A VALID frequency_score are ordered by:
+#   frequency_score DESC, then recency_score DESC, then intensity_score DESC
+# v122: bottles whose frequency_score is NULL/NaN are EXCLUDED entirely —
+# they get no rank and are not counted in the "of N" total (no badge shown).
+# Cached and rebuilt whenever the main DataFrame cache changes.
+# ---------------------------------------------------------------------
+_POP_RANK_CACHE = {"map": None, "total": 0, "built_at": -1.0}
+
+def _build_popularity_rank_map():
+    df = get_all_data_as_df()
+    if df is None or df.empty or "bottle_id" not in df.columns:
+        return {}, 0
+
+    needed = ["frequency_score", "recency_score", "intensity_score"]
+    tmp = df[["bottle_id"] + [c for c in needed if c in df.columns]].copy()
+
+    # Ensure all three columns exist; missing ones -> NaN.
+    for c in needed:
+        if c not in tmp.columns:
+            tmp[c] = float("nan")
+        else:
+            tmp[c] = pd.to_numeric(tmp[c], errors="coerce")
+
+    # v122: bottles without a valid frequency_score are EXCLUDED from the
+    # ranking entirely — no rank, not counted in the total.
+    tmp = tmp[tmp["frequency_score"].notna()].copy()
+    if tmp.empty:
+        return {}, 0
+
+    # Tiebreakers may still be NULL among the ranked bottles -> sink them
+    # to the bottom of the tiebreak only (frequency is always valid here).
+    for c in ("recency_score", "intensity_score"):
+        tmp[c] = tmp[c].fillna(float("-inf"))
+
+    # Stable sort: primary freq desc, tiebreak recency desc, then intensity desc.
+    tmp = tmp.sort_values(
+        by=needed,
+        ascending=[False, False, False],
+        kind="mergesort",
+    ).reset_index(drop=True)
+
+    rank_map = {}
+    for pos, bid in enumerate(tmp["bottle_id"].tolist(), start=1):
+        try:
+            rank_map[int(bid)] = pos
+        except (TypeError, ValueError):
+            continue
+
+    return rank_map, len(tmp)
+
+def get_popularity_rank(bottle_id):
+    """Return (rank, total) for a bottle_id, or (None, total) if unknown.
+    Cache is rebuilt whenever the underlying data cache is refreshed."""
+    try:
+        bid = int(bottle_id)
+    except (TypeError, ValueError):
+        return None, _POP_RANK_CACHE.get("total", 0)
+
+    data_stamp = CACHE_DATA.get("last_update", 0)
+    if (_POP_RANK_CACHE["map"] is None
+            or _POP_RANK_CACHE["built_at"] != data_stamp):
+        rank_map, total = _build_popularity_rank_map()
+        _POP_RANK_CACHE["map"] = rank_map
+        _POP_RANK_CACHE["total"] = total
+        _POP_RANK_CACHE["built_at"] = data_stamp
+
+    return _POP_RANK_CACHE["map"].get(bid), _POP_RANK_CACHE["total"]
 
 
 # Cache for history table (update tab usage)
@@ -1231,7 +1316,36 @@ app.layout = dbc.Container(fluid=True, style={"maxWidth": "1600px"}, children=[
                             disabled=True,   # יופעל רק כשיש המלצה
                         ),
                         html.Hr(),
-                        
+
+                        # Drink Calculator (moved here in v118 — top slot)
+                        dbc.Card([
+                            dbc.CardBody([
+                                dbc.Row([
+                                    dbc.Col([dbc.Label("Pour (ml)"), dbc.Input(id='pour-size', type='number', value=30)], width=4),
+                                    dbc.Col([dbc.Label("Glasses"), dbc.Input(id='glass-count', type='number', value=1)], width=4),
+                                    dbc.Col([dbc.Label("Action"), dbc.Button("Drink!", id='btn-calculate-pour', color="warning", outline=True, className="w-100")], width=4),
+                                ], className="mb-2"),
+                                dbc.Row([
+                                    dbc.Col([
+                                        dbc.Label("🥃 Who's drinking?"),
+                                        dcc.Dropdown(
+                                            id='drinker-pour',
+                                            options=[],
+                                            multi=True,
+                                            placeholder="Select drinker(s)...",
+                                            style={'fontSize': '13px'},
+                                        ),
+                                        dbc.Input(
+                                            id='drinker-pour-manual',
+                                            placeholder="Or type new name(s), comma separated...",
+                                            size="sm",
+                                            className="mt-1",
+                                        ),
+                                    ]),
+                                ]),
+                            ])
+                        ], className="mb-3 bg-light"),
+
                         # Random Dram Generator / Personalized Suggestion
                         dbc.Card([
                             dbc.CardHeader("🎲 Dram Suggester"),
@@ -1335,54 +1449,6 @@ app.layout = dbc.Container(fluid=True, style={"maxWidth": "1600px"}, children=[
                                 html.Div(id='suggestion-top3-msg', className="text-muted mt-1", style={"fontSize": "12px"}),
                             ])
                         ], className="mb-3 border-dark"),
-                        dbc.Card(
-                        dbc.CardBody(
-                            [
-                                html.Div("🧾 Top 3 bottles losing flavors soon", className="fw-bold mb-2"),
-                                dash_table.DataTable(
-                                    id="bb-top3-dt",
-                                    columns=[
-                                        {"name": "Distillery", "id": "distillery"},
-                                        {"name": "Bottle", "id": "bottle_name"},
-                                        {"name": "Best Before", "id": "Best_Before"},
-                                        {"name": "Days Left", "id": "days_left"},
-                                        {"name": "bottle_id", "id": "bottle_id"},
-                                    ],
-                                    hidden_columns=["bottle_id"],
-                                    data=[],
-                                    page_action="none",
-                                    sort_action="none",
-                                    row_selectable=False,
-                                    style_as_list_view=True,
-                                    style_table={"overflowX": "auto", "maxWidth": "500px"},
-                                    style_cell={
-                                        "padding": "8px",
-                                        "fontSize": "14px",
-                                        "border": "none",
-                                        "whiteSpace": "nowrap",
-                                    },
-                                    style_header={
-                                        "fontWeight": "700",
-                                        "borderBottom": "1px solid rgba(0,0,0,0.08)",
-                                    },
-                                    style_data={
-                                        "borderBottom": "1px solid rgba(0,0,0,0.06)",
-                                    },
-                                    style_data_conditional=[
-                                        {"if": {"state": "active"}, "cursor": "pointer"},
-                                    ],
-                                ),
-                                html.Div(id="bb-top3-msg", className="text-muted mt-2", style={"fontSize": "13px"}),
-                            ]
-                        ),
-                        className="border-0 mt-3",
-                        
-                        style={
-                            "borderRadius": "14px",
-                            "boxShadow": "0 6px 18px rgba(0,0,0,0.08)",
-                            "background": "rgba(255,255,255,0.92)",
-                        },
-                    ),
                     ], width=3),
 
                     # Right Column: Bottle Visualizer + Flavor Evolution side by side
@@ -1523,35 +1589,7 @@ app.layout = dbc.Container(fluid=True, style={"maxWidth": "1600px"}, children=[
                         ], justify="center"),
                         html.H5(id='bottle-level-display', className="mt-3 text-info text-center", children="Select a bottle"),
                         dcc.Interval(id="best-before-interval", interval=300000, n_intervals=0),
-                        html.Div(id='bottle-info-badges', className="mb-3 text-center"),                        
-                        # Drink Calculator
-                        dbc.Card([
-                            dbc.CardBody([
-                                dbc.Row([
-                                    dbc.Col([dbc.Label("Pour (ml)"), dbc.Input(id='pour-size', type='number', value=30)], width=4),
-                                    dbc.Col([dbc.Label("Glasses"), dbc.Input(id='glass-count', type='number', value=1)], width=4),
-                                    dbc.Col([dbc.Label("Action"), dbc.Button("Drink!", id='btn-calculate-pour', color="warning", outline=True, className="w-100")], width=4),
-                                ], className="mb-2"),
-                                dbc.Row([
-                                    dbc.Col([
-                                        dbc.Label("🥃 Who's drinking?"),
-                                        dcc.Dropdown(
-                                            id='drinker-pour',
-                                            options=[],
-                                            multi=True,
-                                            placeholder="Select drinker(s)...",
-                                            style={'fontSize': '13px'},
-                                        ),
-                                        dbc.Input(
-                                            id='drinker-pour-manual',
-                                            placeholder="Or type new name(s), comma separated...",
-                                            size="sm",
-                                            className="mt-1",
-                                        ),
-                                    ]),
-                                ]),
-                            ])
-                        ], className="mb-3 bg-light"),
+                        html.Div(id='bottle-info-badges', className="mb-3 text-center"),
                           ], width=5),
 
                           # Flavor Evolution sub-col
@@ -3942,6 +3980,29 @@ def load_bottle_data(bottle_id):
         best_bef = r.get("Best_Before") if isinstance(r, dict) else getattr(r, "Best_Before", None)
         
         latest_up = r.get("latest_consumption_time") if isinstance(r, dict) else getattr(r, "latest_consumption_time", None)
+
+        # v123 — Edge case: bottles consumed exactly once are NOT in the
+        # forecast table (t3), so t3.latest_consumption_time is NULL via the
+        # LEFT JOIN. That single consumption still stamped t1.updating_time,
+        # so fall back to DATE(t1.updating_time) (= last_update_date) so the
+        # "Latest cons." still shows a real date instead of "-".
+        def _is_missing(v):
+            if v is None:
+                return True
+            try:
+                res = pd.isna(v)
+                if isinstance(res, bool):
+                    return res
+                # array-like result -> treat as missing only if all are NA
+                return bool(getattr(res, "all", lambda: False)())
+            except (TypeError, ValueError):
+                return False
+
+        if _is_missing(latest_up):
+            fallback_up = r.get("last_update_date") if isinstance(r, dict) else getattr(r, "last_update_date", None)
+            if not _is_missing(fallback_up):
+                latest_up = fallback_up
+
         latest_cons = _fmt_date(latest_up)
         
         if int(meta["stock"]) == 100:
@@ -3955,7 +4016,19 @@ def load_bottle_data(bottle_id):
         
         best_bef_str = _fmt_date(best_bef)
         best_txt = f"Best Before: {best_bef_str}"
-        
+
+        # --- v117: extra fields for the redesigned layout ---
+        est_next = r.get("est_next_consumption") if isinstance(r, dict) else getattr(r, "est_next_consumption", None)
+        est_next_str = _fmt_date(est_next)
+
+        conf_raw = r.get("confidence") if isinstance(r, dict) else getattr(r, "confidence", None)
+        conf_val = _safe_float(conf_raw)
+        if conf_val is not None:
+            # confidence may be stored as 0-1 or 0-100; normalize to a 0-100 int
+            conf_pct = conf_val * 100.0 if conf_val <= 1.0 else conf_val
+            conf_txt = f"{int(round(conf_pct))}% confidence"
+        else:
+            conf_txt = None
 
         r_score = _safe_float(r.get('final_richness_score'))
 
@@ -3964,23 +4037,219 @@ def load_bottle_data(bottle_id):
         sweet_lbl  = f"{get_sweetness_label(s_score)} - {round(s_score, 3)}" if s_score is not None else None
         rich_lbl   = f"{get_richness_label(r_score)} - {round(r_score, 3)}"  if r_score is not None else None
 
-        flavor_spans = []
-        if sweet_lbl:
-            flavor_spans.append(html.Span(sweet_lbl, style={**badge_style_sweet(s_score), "marginRight": "6px"}))
-        if rich_lbl:
-            flavor_spans.append(html.Span(rich_lbl, style=badge_style_rich(r_score)))
+        # ============================================================
+        # v117 — Redesigned data layout below the bottle.
+        # ONLY layout + added "confidence" indicator.
+        # All colors are preserved exactly from the existing
+        # badge_style_* helpers / Bootstrap color names.
+        # ============================================================
 
-        badges = html.Div([
-            html.Div([
-                dbc.Badge(f"Total: {meta['vol']}ml", color="dark", className="me-2"),
-                dbc.Badge(f"Current: {current_ml}ml", color="info", className="me-2"),
-            ], className="mb-2"),
-            html.Div([dbc.Badge(pred_txt, color="warning", pill=True, className="me-2"),
-                html.Span(best_txt, style=badge_style_best_before(best_bef)),
-                dbc.Badge(latest_txt,color="primary", pill=True, className="me-2")
-                ],className="mb-2"),
-            html.Div(flavor_spans) if flavor_spans else None,
-        ])
+        # --- shared cell builders (layout only) -------------------
+        _section_line = {
+            "flex": "1",
+            "height": "1px",
+            "background": "rgba(0,0,0,0.10)",
+            "marginLeft": "12px",
+        }
+
+        def _section_header(icon, title, trailing=None):
+            kids = [
+                html.Span(icon, style={"fontSize": "1.15rem", "marginRight": "7px"}),
+                html.Span(title, style={
+                    "fontWeight": "700",
+                    "fontSize": "1.15rem",
+                    "color": "#3a3a3a",
+                }),
+            ]
+            if trailing is not None:
+                kids.append(trailing)
+            kids.append(html.Div(style=_section_line))
+            return html.Div(
+                kids,
+                style={
+                    "display": "flex",
+                    "alignItems": "center",
+                    "marginTop": "18px",
+                    "marginBottom": "10px",
+                },
+            )
+
+        def _stat_cell(label, value, value_style=None):
+            vstyle = {
+                "fontSize": "1.15rem",
+                "fontWeight": "700",
+                "color": "#1a1a1a",
+                "lineHeight": "1.2",
+            }
+            if value_style:
+                vstyle = {**vstyle, **value_style}
+            return html.Div(
+                [
+                    html.Div(label, style={
+                        "fontSize": "0.85rem",
+                        "fontWeight": "600",
+                        "color": "#555",
+                        "marginBottom": "5px",
+                    }),
+                    html.Div(value, style=vstyle),
+                ],
+                style={
+                    "flex": "1",
+                    "minWidth": "0",
+                    "background": "rgba(0,0,0,0.035)",
+                    "borderRadius": "12px",
+                    "padding": "12px 14px",
+                },
+            )
+
+        def _cell_row(cells):
+            return html.Div(
+                cells,
+                style={
+                    "display": "flex",
+                    "gap": "10px",
+                    "marginBottom": "10px",
+                },
+            )
+
+        # --- flavor cells: readable colored chips (v119) ----------
+        # v119 fix: the v117 layout used the badge color as faint text on a
+        # faint background, which was nearly invisible for light colors
+        # (pale pink "Very Sweet", pale yellow "Very Delicate"). We keep the
+        # EXACT same palette from badge_style_* but render the value as a
+        # filled chip. Text is auto black/white via _is_dark_bg, and very
+        # light chip colors are darkened just enough to stay crisp.
+        def _flavor_chip_style(base_color):
+            chip_bg = base_color
+            # If the chip itself is too light, darken it so it reads on the card.
+            if not _is_dark_bg(chip_bg):
+                # mildly light -> small darken; very light -> stronger darken
+                h = chip_bg.lstrip('#')
+                try:
+                    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+                    lum = 0.299 * r + 0.587 * g + 0.114 * b
+                except Exception:
+                    lum = 200
+                if lum >= 210:
+                    chip_bg = _darken_hex(base_color, 0.70)
+                elif lum >= 170:
+                    chip_bg = _darken_hex(base_color, 0.82)
+            txt = "#ffffff" if _is_dark_bg(chip_bg) else "#1a1a1a"
+            return {
+                "display": "inline-block",
+                "backgroundColor": chip_bg,
+                "color": txt,
+                "fontSize": "1.05rem",
+                "fontWeight": "800",
+                "lineHeight": "1.2",
+                "padding": "5px 14px",
+                "borderRadius": "20px",
+                "letterSpacing": "0.2px",
+            }
+
+        flavor_cells = []
+        if sweet_lbl:
+            flavor_cells.append(
+                html.Div(
+                    [
+                        html.Div(get_sweetness_label(s_score), style={
+                            "fontSize": "0.85rem",
+                            "fontWeight": "600",
+                            "color": "#555",
+                            "marginBottom": "7px",
+                        }),
+                        html.Span(
+                            f"{round(s_score, 3)}",
+                            style=_flavor_chip_style(
+                                badge_style_sweet(s_score)["backgroundColor"]
+                            ),
+                        ),
+                    ],
+                    style={
+                        "flex": "1",
+                        "minWidth": "0",
+                        "background": "rgba(0,0,0,0.035)",
+                        "borderRadius": "12px",
+                        "padding": "12px 14px",
+                    },
+                )
+            )
+        if rich_lbl:
+            flavor_cells.append(
+                html.Div(
+                    [
+                        html.Div(get_richness_label(r_score), style={
+                            "fontSize": "0.85rem",
+                            "fontWeight": "600",
+                            "color": "#555",
+                            "marginBottom": "7px",
+                        }),
+                        html.Span(
+                            f"{round(r_score, 3)}",
+                            style=_flavor_chip_style(
+                                badge_style_rich(r_score)["backgroundColor"]
+                            ),
+                        ),
+                    ],
+                    style={
+                        "flex": "1",
+                        "minWidth": "0",
+                        "background": "rgba(0,0,0,0.035)",
+                        "borderRadius": "12px",
+                        "padding": "12px 14px",
+                    },
+                )
+            )
+        # pad to keep 2-up grid alignment when only one flavor exists
+        while 0 < len(flavor_cells) < 2:
+            flavor_cells.append(html.Div(style={"flex": "1", "minWidth": "0"}))
+
+        # --- confidence pill next to the Prediction header --------
+        confidence_pill = None
+        if conf_txt:
+            confidence_pill = html.Span(
+                conf_txt,
+                style={
+                    "fontSize": "1.28rem",
+                    "fontWeight": "600",
+                    "color": "#2e7d32",
+                    "background": "rgba(46,125,50,0.12)",
+                    "borderRadius": "20px",
+                    "padding": "3px 10px",
+                    "marginLeft": "10px",
+                    "whiteSpace": "nowrap",
+                },
+            )
+
+        # --- Best Before value keeps its dynamic color -----------
+        best_color = badge_style_best_before(best_bef).get("backgroundColor", "#1a1a1a")
+
+        # latest consumption display value
+        latest_display = "Closed" if int(meta["stock"]) == 100 else latest_cons
+
+        badges = html.Div(
+            [
+                # ===== STATS =====
+                _section_header("📊", "Stats"),
+                _cell_row([
+                    _stat_cell("Total", f"{meta['vol']} ml"),
+                    _stat_cell("Current", f"{current_ml} ml"),
+                    _stat_cell("Latest cons.", latest_display),
+                ]),
+                _cell_row(flavor_cells) if flavor_cells else None,
+
+                # ===== PREDICTION =====
+                _section_header("🕒", "Prediction", confidence_pill),
+                _cell_row([
+                    _stat_cell("Best before", best_bef_str,
+                               value_style={"color": best_color}),
+                    _stat_cell("Predicted finish", pred_finish_str,
+                               value_style={"color": "#b5651d"}),
+                    _stat_cell("Est. next", est_next_str),
+                ]),
+            ],
+            style={"maxWidth": "560px", "margin": "0 auto"},
+        )
 
         wheel_fig = build_aroma_wheel_figure(
             flavors_df[['flavor_name', 'richness_score', 'smoky_sweet_score', 'flavor_category']].to_dict('records'),
@@ -4008,29 +4277,29 @@ def render_next_consumption_status(_opts):
     if df is None or df.empty:
         return dbc.Alert("No data loaded.", color="secondary", className="mb-0"), None, True
 
-    needed = {"bottle_id", "bottle_name", "distillery", "est_consumption_date"}
+    needed = {"bottle_id", "bottle_name", "distillery", "est_next_consumption"}
     missing = needed - set(df.columns)
     if missing:
         return dbc.Alert(f"Missing columns: {', '.join(sorted(missing))}", color="warning", className="mb-0"), None, True
 
     tmp = df.copy()
-    tmp["est_consumption_date"] = pd.to_datetime(tmp["est_consumption_date"], errors="coerce").dt.date
-    tmp = tmp.dropna(subset=["est_consumption_date"])
+    tmp["est_next_consumption"] = pd.to_datetime(tmp["est_next_consumption"], errors="coerce").dt.date
+    tmp = tmp.dropna(subset=["est_next_consumption"])
 
     # אופציונלי: לא להמליץ על בקבוקים ריקים
     if "current_status" in tmp.columns:
         tmp = tmp[tmp["current_status"].fillna(0) > 0]
 
     if tmp.empty:
-        return dbc.Alert("No upcoming est_consumption_date found.", color="secondary", className="mb-0"), None, True
+        return dbc.Alert("No upcoming est_next_consumption found.", color="secondary", className="mb-0"), None, True
 
-    idx = tmp["est_consumption_date"].idxmin()
+    idx = tmp["est_next_consumption"].idxmin()
     r = tmp.loc[idx]
 
     bid = int(r["bottle_id"])
     bottle = str(r.get("bottle_name", "-"))
     dist = str(r.get("distillery", "-"))
-    dt = r.get("est_consumption_date")
+    dt = r.get("est_next_consumption")
 
     today = datetime.now().date()
     days = (dt - today).days if dt else None
@@ -4091,71 +4360,9 @@ def select_next_consumption_bottle(n, bid):
     return bid
 
 
-# 1.9 Bottles to be changed soon
-@app.callback(
-    [
-        Output("bb-top3-dt", "data"),
-        Output("bb-top3-msg", "children"),
-    ],
-    Input("best-before-interval", "n_intervals"),
-)
-def fill_bb_top3_table(_n):
-    df = get_all_data_as_df()
-    if df is None or df.empty:
-        return [], "No data loaded."
-
-    needed = {"bottle_id", "distillery", "bottle_name", "Best_Before"}
-    missing = needed - set(df.columns)
-    if missing:
-        return [], f"Missing columns: {', '.join(sorted(missing))}"
-
-    tmp = df.copy()
-    tmp["Best_Before"] = pd.to_datetime(tmp["Best_Before"], errors="coerce").dt.date
-    tmp = tmp.dropna(subset=["Best_Before"])
-
-    today = datetime.now().date()
-    tmp["days_left"] = tmp["Best_Before"].apply(lambda d: (d - today).days if d else None)
-
-    # רק חיובי, בלי שלילי/אפס/NULL
-    tmp = tmp[tmp["days_left"].notna() & (tmp["days_left"] > 0)]
-
-    if tmp.empty:
-        return [], "No upcoming Best_Before dates found."
-
-    top3 = tmp.nsmallest(3, "days_left")[["bottle_id", "distillery", "bottle_name", "Best_Before", "days_left"]]
-
-    data = []
-    for _, r in top3.iterrows():
-        data.append({
-            "bottle_id": int(r["bottle_id"]),
-            "distillery": str(r["distillery"]),
-            "bottle_name": str(r["bottle_name"]),
-            "Best_Before": str(r["Best_Before"]),
-            "days_left": int(r["days_left"]),
-        })
-
-    return data, "Tip: click a row to select the bottle."
-
-# 1.95 Select bottle
-@app.callback(
-    Output("update-selector", "value", allow_duplicate=True),
-    Input("bb-top3-dt", "active_cell"),
-    State("bb-top3-dt", "data"),
-    prevent_initial_call=True
-)
-def select_bottle_from_bb_table(active_cell, data):
-    if not active_cell or not data:
-        return no_update
-
-    row = active_cell.get("row")
-    if row is None or row >= len(data):
-        return no_update
-
-    bid = data[row].get("bottle_id")
-    if not bid:
-        return no_update
-
-    return bid
+# 1.9 / 1.95 — "Top 3 bottles losing flavors soon" feature removed in v118.
+# Its layout components (bb-top3-dt / bb-top3-msg) and the two callbacks
+# that fed/handled them were removed along with the section.
 
 # 1.96 Select bottle from personalized suggestion table
 @app.callback(
@@ -4292,6 +4499,92 @@ def upd_handle_wheel_click(click_data, targets, nose_val, nose_opts, pal_val, pa
     return new_nose_val, new_nose_opts, new_pal_val, new_pal_opts, fig
 
 
+# ---------------------------------------------------------------------
+# v121 — Visual popularity-rank badge.
+# 1st = gold medal, 2nd = silver, 3rd = bronze (rich pill with the
+# medal emoji + "of N"); 4th and beyond = a simpler, flatter chip.
+# ---------------------------------------------------------------------
+def build_popularity_badge(bottle_id):
+    rank, total = get_popularity_rank(bottle_id)
+    if not rank or not total:
+        return None
+
+    medals = {
+        1: {"emoji": "🥇", "label": "1st most popular",
+            "grad": "linear-gradient(135deg, #f9d976 0%, #d4a017 60%, #b8860b 100%)",
+            "txt": "#3a2c00", "ring": "rgba(212,160,23,0.55)"},
+        2: {"emoji": "🥈", "label": "2nd most popular",
+            "grad": "linear-gradient(135deg, #e8e8e8 0%, #b8c0c8 55%, #9aa3ab 100%)",
+            "txt": "#2b3138", "ring": "rgba(154,163,171,0.55)"},
+        3: {"emoji": "🥉", "label": "3rd most popular",
+            "grad": "linear-gradient(135deg, #e8a877 0%, #c87f3e 55%, #a5612a 100%)",
+            "txt": "#3a2410", "ring": "rgba(165,97,42,0.55)"},
+    }
+
+    if rank in medals:
+        m = medals[rank]
+        return html.Div(
+            [
+                html.Span(m["emoji"], style={
+                    "fontSize": "1.25rem",
+                    "marginRight": "8px",
+                    "lineHeight": "1",
+                }),
+                html.Span(m["label"], style={
+                    "fontWeight": "800",
+                    "fontSize": "0.95rem",
+                    "letterSpacing": "0.2px",
+                }),
+                html.Span(f"  ·  #{rank} of {total}", style={
+                    "fontWeight": "600",
+                    "fontSize": "0.85rem",
+                    "opacity": "0.8",
+                    "marginLeft": "6px",
+                }),
+            ],
+            style={
+                "display": "inline-flex",
+                "alignItems": "center",
+                "background": m["grad"],
+                "color": m["txt"],
+                "padding": "7px 16px",
+                "borderRadius": "22px",
+                "marginTop": "8px",
+                "boxShadow": f"0 3px 10px {m['ring']}",
+            },
+        )
+
+    # 4th and beyond — simpler, flatter chip.
+    return html.Div(
+        [
+            html.Span("📈", style={
+                "fontSize": "0.95rem",
+                "marginRight": "7px",
+                "lineHeight": "1",
+            }),
+            html.Span(f"#{rank}", style={
+                "fontWeight": "800",
+                "fontSize": "0.95rem",
+            }),
+            html.Span(f" of {total} in popularity", style={
+                "fontWeight": "600",
+                "fontSize": "0.82rem",
+                "opacity": "0.75",
+                "marginLeft": "5px",
+            }),
+        ],
+        style={
+            "display": "inline-flex",
+            "alignItems": "center",
+            "background": "rgba(0,0,0,0.05)",
+            "color": "#555",
+            "padding": "5px 14px",
+            "borderRadius": "20px",
+            "marginTop": "8px",
+        },
+    )
+
+
 # 3. VISUAL UPDATE (FIXED - Shows correct initial level)
 @app.callback(
     [Output('liquid-fill', 'style'),
@@ -4338,8 +4631,23 @@ def update_visuals(slider_val, meta, n_pour, pour_ml, glasses):
         'transition': 'height 0.3s ease',
         'height': f'{current_pct}%'
     }
-    
-    return style, current_pct, display_text
+
+    # v121 — show the popularity rank badge under the name/percentage.
+    rank_badge = None
+    try:
+        rank_badge = build_popularity_badge(meta.get('bid'))
+    except Exception:
+        rank_badge = None
+
+    if rank_badge is not None:
+        display_children = html.Div([
+            html.Div(display_text),
+            rank_badge,
+        ])
+    else:
+        display_children = display_text
+
+    return style, current_pct, display_children
 
 
 # 4a. DRAM MODE TOGGLE – show/hide sections + clear output
@@ -4830,10 +5138,10 @@ def execute_update(n, meta, stock, nose, palette, abv, nose_man, pal_man, glasse
         # ── Step 1: Pre-fetch forecast data in Python (1 small query, no scripting) ──
         forecast_rows = list(client.query(f"""
             SELECT bottle_id,
-                   DATE(est_consumption_date)  AS ec,
+                   DATE(est_next_consumption)  AS ec,
                    DATE(predicted_finish_date) AS pf
             FROM `{FORECAST_TABLE_REF}`
-            WHERE DATE(est_consumption_date)  = '{today}'
+            WHERE DATE(est_next_consumption)  = '{today}'
                OR DATE(predicted_finish_date) = '{today}'
         """).result())
 
@@ -7112,13 +7420,10 @@ def dca_top_bottles_per_drinker(sel_drinkers, sel_types, sel_months):
     # ── Filter by month(s) using update_time → "M-YYYY" ──
     if sel_months:
         ut = pd.to_datetime(f['update_time'], errors='coerce', utc=True)
-        # Format without leading zero on month, to match VIEW's "11-2025" / "1-2026"
         row_month_year = ut.dt.month.astype('Int64').astype(str) + '-' + ut.dt.year.astype('Int64').astype(str)
         f = f[row_month_year.isin(sel_months)]
 
     # ── Split drams + ml evenly across co-drinkers on the same row ──
-    # A row with drams_counter=4 and drinker_name=['Roy','Shaked'] means
-    # 2 drams per drinker, not 4 each. Same for ml_consumed.
     f = f.copy()
     f['_n_drinkers'] = f['drinker_name'].apply(
         lambda x: len(x) if isinstance(x, (list, tuple)) and len(x) > 0 else 1
@@ -7131,10 +7436,19 @@ def dca_top_bottles_per_drinker(sel_drinkers, sel_types, sel_months):
         pd.to_numeric(f['ml_consumed'], errors='coerce').fillna(0)
         / f['_n_drinkers']
     )
-    # Drams from valid-ml rows ONLY — used as denominator for avg ml/dram,
-    # so bulk initial-load events don't dilute the pour-size average.
     is_valid = f['is_valid_ml'].fillna(False).astype(bool)
     f['valid_drams_per_drinker'] = f['drams_per_drinker'].where(is_valid, 0.0)
+
+    # ── Normalize bottle_name: strip distillery prefix if bot included it ──
+    # Bot writes "Milk & Honey Single Cask PX Sherry" but manual rows write
+    # just "Single Cask PX Sherry". Same bottle_id — collapse to one name.
+    def _strip_distillery(row):
+        name = str(row['bottle_name']).strip()
+        dist = str(row['distillery']).strip() if pd.notna(row['distillery']) else ''
+        if dist and name.lower().startswith(dist.lower() + ' '):
+            return name[len(dist) + 1:].strip()
+        return name
+    f['bottle_name'] = f.apply(_strip_distillery, axis=1)
 
     # Explode drinker_name array → one row per drinker per update
     f = f.explode('drinker_name').rename(columns={'drinker_name': 'drinker'})
@@ -7146,16 +7460,16 @@ def dca_top_bottles_per_drinker(sel_drinkers, sel_types, sel_months):
     if f.empty:
         return dbc.Alert("No bottles found for the selected filters.",
                          color="info")
+        
+    f['update_date'] = pd.to_datetime(f['update_time'], errors='coerce', utc=True).dt.date
 
     # Aggregate: sum per-drinker drams + ml + count distinct sessions
     agg = (f.groupby(['drinker', 'distillery', 'bottle_name'], as_index=False)
             .agg(total_drams=('drams_per_drinker', 'sum'),
                  total_ml=('ml_per_drinker', 'sum'),
                  valid_drams=('valid_drams_per_drinker', 'sum'),
-                 sessions=('update_id', 'nunique')))
+                 sessions=('update_date', 'nunique')))
 
-    # Average ml per dram → tie-breaker when total_drams is equal.
-    # Denominator uses ONLY valid-ml drams to avoid skew from initial-load rows.
     agg['avg_ml_per_dram'] = (agg['total_ml'] /
                               agg['valid_drams'].replace(0, pd.NA)).fillna(0)
 
